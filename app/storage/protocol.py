@@ -44,7 +44,7 @@ class StorageBackend(Protocol):
         """
         ...
 
-    def get_url(self, bucket: str, path: str) -> str:
+    async def get_url(self, bucket: str, path: str) -> str:
         """Get access URL for a file.
 
         Args:

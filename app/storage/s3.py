@@ -62,8 +62,10 @@ class S3StorageBackend:
         async with self.session.client('s3', region_name=self.region) as s3:
             await s3.delete_object(Bucket=bucket, Key=path)
 
-    def get_url(self, bucket: str, path: str, expires_in: int = 3600) -> str:
+    async def get_url(self, bucket: str, path: str, expires_in: int = 3600) -> str:
         """Generate presigned URL for S3 object.
+
+        Uses async aioboto3 for consistent async implementation.
 
         Args:
             bucket: S3 bucket name
@@ -73,10 +75,9 @@ class S3StorageBackend:
         Returns:
             str: Presigned URL for direct access
         """
-        import boto3
-        s3 = boto3.client('s3', region_name=self.region)
-        return s3.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': bucket, 'Key': path},
-            ExpiresIn=expires_in
-        )
+        async with self.session.client('s3', region_name=self.region) as s3:
+            return await s3.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': bucket, 'Key': path},
+                ExpiresIn=expires_in
+            )

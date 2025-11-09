@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     }
     WEBP_QUALITY: int = 85
 
+    # Celery Worker Configuration
+    CELERY_TASK_SERIALIZER: str = "json"
+    CELERY_RESULT_SERIALIZER: str = "json"
+    CELERY_ACCEPT_CONTENT: List[str] = ["json"]
+    CELERY_TIMEZONE: str = "UTC"
+    CELERY_ENABLE_UTC: bool = True
+    CELERY_TASK_TRACK_STARTED: bool = True
+    CELERY_TASK_ACKS_LATE: bool = True  # Acknowledge after completion
+    CELERY_WORKER_PREFETCH_MULTIPLIER: int = 1  # One task at a time
+    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = 50  # Restart for memory cleanup
+
     class Config:
         """Pydantic configuration."""
         env_file = ".env"

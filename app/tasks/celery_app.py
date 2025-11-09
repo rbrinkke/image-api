@@ -11,17 +11,17 @@ celery_app = Celery(
     backend=settings.REDIS_URL.replace("/0", "/1")  # Use Redis DB 1 for results
 )
 
-# Configure Celery
+# Configure Celery from Settings (consistent with FastAPI config approach)
 celery_app.conf.update(
-    task_serializer='json',
-    accept_content=['json'],
-    result_serializer='json',
-    timezone='UTC',
-    enable_utc=True,
-    task_track_started=True,
-    task_acks_late=True,  # Acknowledge after completion, not on start
-    worker_prefetch_multiplier=1,  # Fetch one task at a time
-    worker_max_tasks_per_child=50,  # Restart worker after 50 tasks (memory cleanup)
+    task_serializer=settings.CELERY_TASK_SERIALIZER,
+    accept_content=settings.CELERY_ACCEPT_CONTENT,
+    result_serializer=settings.CELERY_RESULT_SERIALIZER,
+    timezone=settings.CELERY_TIMEZONE,
+    enable_utc=settings.CELERY_ENABLE_UTC,
+    task_track_started=settings.CELERY_TASK_TRACK_STARTED,
+    task_acks_late=settings.CELERY_TASK_ACKS_LATE,
+    worker_prefetch_multiplier=settings.CELERY_WORKER_PREFETCH_MULTIPLIER,
+    worker_max_tasks_per_child=settings.CELERY_WORKER_MAX_TASKS_PER_CHILD,
 )
 
 # Import tasks to register them with Celery

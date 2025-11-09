@@ -67,7 +67,7 @@ class LocalStorageBackend:
         if full_path.exists():
             full_path.unlink()
 
-    def get_url(self, bucket: str, path: str) -> str:
+    async def get_url(self, bucket: str, path: str) -> str:
         """Get URL for static file serving.
 
         Args:

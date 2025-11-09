@@ -145,6 +145,25 @@ class ProcessorDB:
             row = await cursor.fetchone()
             return row and row[0] is not None
 
+    def _parse_job_row(self, row: aiosqlite.Row) -> dict:
+        """Parse job row and deserialize JSON fields.
+
+        This eliminates duplication of JSON parsing logic across query methods.
+
+        Args:
+            row: Database row from processing_jobs table
+
+        Returns:
+            dict: Parsed job data with deserialized JSON fields
+        """
+        result = dict(row)
+        # Deserialize JSON fields
+        if result.get('processed_paths'):
+            result['processed_paths'] = json.loads(result['processed_paths'])
+        if result.get('processing_metadata'):
+            result['processing_metadata'] = json.loads(result['processing_metadata'])
+        return result
+
     async def get_job(self, job_id: str) -> Optional[dict]:
         """Get job details by job_id.
 
@@ -161,13 +180,7 @@ class ProcessorDB:
             ) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    result = dict(row)
-                    # Parse JSON fields
-                    if result.get('processed_paths'):
-                        result['processed_paths'] = json.loads(result['processed_paths'])
-                    if result.get('processing_metadata'):
-                        result['processing_metadata'] = json.loads(result['processing_metadata'])
-                    return result
+                    return self._parse_job_row(row)
         return None
 
     async def get_job_by_image_id(self, image_id: str) -> Optional[dict]:
@@ -188,13 +201,7 @@ class ProcessorDB:
             """, (image_id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    result = dict(row)
-                    # Parse JSON fields
-                    if result.get('processed_paths'):
-                        result['processed_paths'] = json.loads(result['processed_paths'])
-                    if result.get('processing_metadata'):
-                        result['processing_metadata'] = json.loads(result['processing_metadata'])
-                    return result
+                    return self._parse_job_row(row)
         return None
 
     async def check_rate_limit(self, user_id: str, max_uploads: int = 50) -> dict:

@@ -85,18 +85,24 @@ async def get_statistics(db=Depends(get_db)):
 
     # Celery queue health
     try:
-        inspect = celery_app.control.inspect()
+        # Use timeout to prevent blocking
+        inspect = celery_app.control.inspect(timeout=2.0)
         active_tasks = inspect.active()
 
         celery_stats = {
             "active_workers": len(active_tasks) if active_tasks else 0,
             "active_tasks": sum(len(tasks) for tasks in active_tasks.values()) if active_tasks else 0
         }
-    except Exception:
+    except (TimeoutError, OSError, ConnectionError) as e:
+        # Specific handling for Celery connection failures
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Celery inspection failed: {type(e).__name__}: {e}")
+
         celery_stats = {
             "active_workers": 0,
             "active_tasks": 0,
-            "error": "Could not connect to Celery"
+            "error": f"Could not connect to Celery: {type(e).__name__}"
         }
 
     return {
