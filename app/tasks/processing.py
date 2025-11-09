@@ -8,6 +8,7 @@ import asyncio
 import aiosqlite
 from typing import Dict, Tuple
 from datetime import datetime
+from pydantic import BaseModel
 
 from app.db.sqlite import get_db
 from app.storage import get_storage
@@ -16,6 +17,29 @@ from app.tasks.celery_app import celery_app
 
 
 logger = get_task_logger(__name__)
+
+
+class VariantMetadata(BaseModel):
+    """Metadata for a single image variant.
+
+    Provides type-safe representation of processed image variant properties.
+    """
+    width: int
+    height: int
+    aspect_ratio: float
+    format: str = "webp"
+    size_bytes: int
+
+
+class ProcessingResult(BaseModel):
+    """Complete processing result metadata.
+
+    Encapsulates all metadata generated during image processing,
+    including dominant color, original dimensions, and variant details.
+    """
+    dominant_color: str
+    original_dimensions: Dict[str, int]
+    variants: Dict[str, VariantMetadata]
 
 
 def strip_exif_metadata(image: Image.Image) -> Image.Image:
@@ -66,7 +90,7 @@ def process_variant(
     image: Image.Image,
     max_dimension: int,
     quality: int = 85
-) -> Tuple[bytes, Dict]:
+) -> Tuple[bytes, VariantMetadata]:
     """Generate single size variant with WebP conversion.
 
     Maintains aspect ratio while constraining to maximum dimension.
@@ -77,7 +101,7 @@ def process_variant(
         quality: WebP quality (0-100)
 
     Returns:
-        tuple: (webp_bytes, metadata_dict)
+        tuple: (webp_bytes, VariantMetadata)
     """
     width, height = image.size
     aspect_ratio = width / height
@@ -101,14 +125,14 @@ def process_variant(
     resized.save(buffer, format='WEBP', quality=quality, method=6)
     buffer.seek(0)
 
-    # Generate metadata
-    metadata = {
-        'width': new_width,
-        'height': new_height,
-        'aspect_ratio': round(aspect_ratio, 3),
-        'format': 'webp',
-        'size_bytes': buffer.getbuffer().nbytes
-    }
+    # Generate type-safe metadata using Pydantic model
+    metadata = VariantMetadata(
+        width=new_width,
+        height=new_height,
+        aspect_ratio=round(aspect_ratio, 3),
+        format='webp',
+        size_bytes=buffer.getbuffer().nbytes
+    )
 
     return buffer.read(), metadata
 
@@ -187,19 +211,20 @@ def process_image_task(self, job_id: str):
             processed_paths[variant_name] = webp_path
             variants_metadata[variant_name] = meta
 
-            logger.info(f"Uploaded {variant_name}: {meta['size_bytes']} bytes")
+            logger.info(f"Uploaded {variant_name}: {meta.size_bytes} bytes")
 
-        # Compile complete metadata
-        total_metadata = {
-            'dominant_color': dominant_color,
-            'original_dimensions': {
+        # Compile complete metadata using type-safe Pydantic model
+        processing_result = ProcessingResult(
+            dominant_color=dominant_color,
+            original_dimensions={
                 'width': image.size[0],
                 'height': image.size[1]
             },
-            'variants': variants_metadata
-        }
+            variants=variants_metadata
+        )
 
-        # Merge with existing metadata
+        # Convert to dictionary and merge with existing metadata
+        total_metadata = processing_result.model_dump()
         if job.get('processing_metadata'):
             total_metadata = {**job['processing_metadata'], **total_metadata}
 

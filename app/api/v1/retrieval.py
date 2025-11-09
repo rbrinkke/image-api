@@ -52,7 +52,7 @@ async def get_image_info(
 
     bucket = job["storage_bucket"]
     path = paths[size.value]
-    url = storage.get_url(bucket, path)
+    url = await storage.get_url(bucket, path)
 
     metadata = job["processing_metadata"]
 
@@ -94,10 +94,10 @@ async def get_all_image_sizes(
     bucket = job["storage_bucket"]
     paths = job["processed_paths"]
 
-    urls = {
-        variant: storage.get_url(bucket, path)
-        for variant, path in paths.items()
-    }
+    # Generate URLs for all variants asynchronously
+    urls = {}
+    for variant, path in paths.items():
+        urls[variant] = await storage.get_url(bucket, path)
 
     return {
         "image_id": image_id,
@@ -154,7 +154,7 @@ async def serve_image_direct(
         )
     # S3 storage: redirect to presigned URL
     else:
-        url = storage.get_url(bucket, path, expires_in=3600)
+        url = await storage.get_url(bucket, path, expires_in=3600)
         return RedirectResponse(url=url, status_code=307)
 
 
@@ -253,7 +253,7 @@ async def get_images_batch(
             if job and job["processed_paths"].get(size.value):
                 bucket = job["storage_bucket"]
                 path = job["processed_paths"][size.value]
-                url = storage.get_url(bucket, path)
+                url = await storage.get_url(bucket, path)
 
                 results.append({
                     "image_id": image_id,
