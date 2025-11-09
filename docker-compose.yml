@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  # Redis - Message broker and result backend for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: image-processor-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - processor_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # FastAPI API Server
+  api:
+    build: .
+    container_name: image-processor-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - processor_data:/data
+      - ./app:/app/app  # Development: hot reload
+    environment:
+      # Database
+      DATABASE_PATH: /data/processor.db
+
+      # Storage
+      STORAGE_PATH: /data/storage
+      STORAGE_BACKEND: local  # Options: local, s3
+      # AWS_REGION: eu-west-1  # Uncomment for S3
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-in-production}
+      JWT_ALGORITHM: HS256
+
+      # Upload Constraints
+      MAX_UPLOAD_SIZE_MB: 10
+      ALLOWED_MIME_TYPES: '["image/jpeg","image/png","image/webp"]'
+
+      # Rate Limiting
+      RATE_LIMIT_MAX_UPLOADS: 50
+      RATE_LIMIT_WINDOW_MINUTES: 60
+
+      # Processing
+      WEBP_QUALITY: 85
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - processor_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Celery Worker - Image processing
+  worker:
+    build: .
+    container_name: image-processor-worker
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4
+    volumes:
+      - processor_data:/data
+      - ./app:/app/app  # Development: hot reload
+    environment:
+      # Database
+      DATABASE_PATH: /data/processor.db
+
+      # Storage
+      STORAGE_PATH: /data/storage
+      STORAGE_BACKEND: local
+      # AWS_REGION: eu-west-1  # Uncomment for S3
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+
+      # Processing
+      WEBP_QUALITY: 85
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - processor_network
+    restart: unless-stopped
+
+  # Flower - Celery monitoring UI
+  flower:
+    build: .
+    container_name: image-processor-flower
+    command: celery -A app.tasks.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+      - worker
+    networks:
+      - processor_network
+    restart: unless-stopped
+
+volumes:
+  # Persistent storage for SQLite database and processed images
+  processor_data:
+    driver: local
+
+  # Redis data persistence
+  redis_data:
+    driver: local
+
+networks:
+  processor_network:
+    driver: bridge
