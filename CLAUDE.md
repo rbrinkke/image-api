@@ -27,6 +27,7 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Access services
 open http://localhost:8000/docs      # API documentation
+open http://localhost:8000/dashboard # Technical monitoring dashboard
 open http://localhost:5555            # Flower (Celery monitoring)
 ```
 
@@ -210,6 +211,56 @@ See `.env.example` for all options.
 - **flower**: Monitoring UI (port 5555)
 - **Volumes**: `processor_data` (DB + images), `redis_data` (persistence)
 
+## Technical Dashboard
+
+**Comprehensive real-time monitoring and troubleshooting interface**
+
+Access: `http://localhost:8000/dashboard`
+
+### Features
+
+- **Auto-refresh**: 5-second updates with countdown indicator
+- **System Resources**: CPU, memory, disk usage with progress bars
+- **Database Health**: Connection status, size, table counts, recent activity
+- **Redis Status**: Memory, connections, queue lengths, ops/sec
+- **Celery Workers**: Active workers, task counts, registered tasks
+- **Processing Metrics**: Jobs by status, performance stats (1h/24h), recent jobs
+- **Storage Info**: Backend type, disk usage (local), file counts
+- **Rate Limiting**: Users near limit, active windows
+- **Error Tracking**: Recent failures, error summary, patterns
+- **Configuration**: Current settings (non-sensitive)
+
+### Dashboard API
+
+```bash
+# Get all metrics as JSON
+curl http://localhost:8000/dashboard/data | jq .
+
+# Monitor specific metrics
+curl -s http://localhost:8000/dashboard/data | jq '.celery.workers.active'
+curl -s http://localhost:8000/dashboard/data | jq '.errors.error_summary.last_hour'
+curl -s http://localhost:8000/dashboard/data | jq '.redis.queue_lengths.celery'
+```
+
+### Quick Troubleshooting
+
+**Images not processing?**
+1. Check Celery workers active: Dashboard → Celery Workers
+2. Check Redis queue length: Dashboard → Redis Status
+3. Check recent failures: Dashboard → Recent Failures
+
+**Slow processing?**
+1. Check avg processing time: Dashboard → Processing Metrics
+2. Check system resources: Dashboard → System Resources
+3. Check worker count vs queue length
+
+**High failure rate?**
+1. Review recent failures: Dashboard → Recent Failures
+2. Check error patterns in error messages
+3. Verify storage disk space: Dashboard → Storage Info
+
+See `DASHBOARD.md` for complete documentation.
+
 ## Security Features
 
 1. **JWT Authentication**: Token validation for upload/delete operations
@@ -384,6 +435,7 @@ test_images/            # 8 test images (JPEG, PNG, WebP)
 
 - `README.md`: Quick start, features, API reference
 - `CLAUDE.md`: This file - development guide
+- `DASHBOARD.md`: Technical dashboard documentation
 - `DEPLOYMENT_SUCCESS.md`: Deployment verification report
 - `app/db/schema.sql`: Complete database schema
 - `.env.example`: Configuration template
