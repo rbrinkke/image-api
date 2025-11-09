@@ -11,7 +11,7 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-API_URL="http://localhost:8000"
+API_URL="http://localhost:8002"  # image-api runs on port 8002 (write-api uses 8000)
 PASSED=0
 FAILED=0
 
@@ -21,7 +21,8 @@ echo -e "${BLUE}╚════════════════════�
 
 # Generate JWT
 echo -n "🔐 Generating JWT token... "
-JWT_TOKEN=$(python3 -c "import jwt; print(jwt.encode({'sub': 'test-user'}, 'dev-secret-change-in-production', algorithm='HS256'))")
+JWT_SECRET="9c1e3ddbc3c2dfb6d3f167f9c2298902da5dbb8381405b2cbc4e827fe0fca5b4"
+JWT_TOKEN=$(python3 -c "import jwt; print(jwt.encode({'sub': 'test-user'}, '$JWT_SECRET', algorithm='HS256'))")
 if [ -n "$JWT_TOKEN" ]; then
     echo -e "${GREEN}✓${NC}"
     ((PASSED++))
