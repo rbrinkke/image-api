@@ -9,7 +9,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.db.sqlite import get_db
-from app.api.v1 import upload, retrieval, health
+from app.api.v1 import upload, retrieval, health, dashboard
 
 
 # Configure logging
@@ -67,6 +67,7 @@ app.add_middleware(
 app.include_router(upload.router)
 app.include_router(retrieval.router)
 app.include_router(health.router)
+app.include_router(dashboard.router)
 
 # Mount static files for local storage backend
 if settings.STORAGE_BACKEND == "local":
@@ -94,6 +95,7 @@ async def root():
         "description": "Domain-agnostic image processing microservice",
         "documentation": "/docs",
         "health_check": "/api/v1/health",
+        "dashboard": "/dashboard",
         "storage_backend": settings.STORAGE_BACKEND
     }
 
