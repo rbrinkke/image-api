@@ -25,8 +25,10 @@ pyjwt==2.8.0
 python-jose[cryptography]==3.3.0
 
 # AWS Support (optional, for S3 storage)
+# Compatible versions: aioboto3 12.0.0 → aiobotocore 2.7.0 → botocore <1.31.65
 aioboto3==12.0.0
-boto3==1.29.7
+boto3==1.28.64
+botocore==1.31.64
 
 # Configuration & Utilities
 pydantic==2.5.0
