@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # S3 Mock Server
+  s3-mock:
+    build:
+      context: ..
+      dockerfile: mocks/Dockerfile.mocks
+    container_name: mock-s3
+    command: python -m uvicorn mocks.s3_mock:app --host 0.0.0.0 --port 9000 --reload
+    ports:
+      - "9000:9000"
+    environment:
+      PORT: 9000
+      PRESIGNED_URL_BASE: http://localhost:9000
+    volumes:
+      - ../mocks:/app/mocks:ro
+    networks:
+      - mock_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Client Application Mock
+  client-app:
+    build:
+      context: ..
+      dockerfile: mocks/Dockerfile.mocks
+    container_name: mock-client-app
+    command: python -m uvicorn mocks.client_app_mock:app --host 0.0.0.0 --port 3000 --reload
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      IMAGE_API_URL: http://host.docker.internal:8002
+      JWT_SECRET: dev-secret-change-in-production
+    volumes:
+      - ../mocks:/app/mocks:ro
+    networks:
+      - mock_network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Webhook Receiver Mock
+  webhook-receiver:
+    build:
+      context: ..
+      dockerfile: mocks/Dockerfile.mocks
+    container_name: mock-webhook-receiver
+    command: python -m uvicorn mocks.webhook_receiver_mock:app --host 0.0.0.0 --port 4000 --reload
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      WEBHOOK_SECRET: webhook-secret-123
+    volumes:
+      - ../mocks:/app/mocks:ro
+    networks:
+      - mock_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+networks:
+  mock_network:
+    driver: bridge
