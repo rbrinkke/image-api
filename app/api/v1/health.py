@@ -6,9 +6,11 @@ import aiosqlite
 
 from app.db.sqlite import get_db
 from app.core.config import settings
+from app.core.logging_config import get_logger
 from app.tasks.celery_app import celery_app
 
 
+logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/health", tags=["health"])
 
 
@@ -95,9 +97,11 @@ async def get_statistics(db=Depends(get_db)):
         }
     except (TimeoutError, OSError, ConnectionError) as e:
         # Specific handling for Celery connection failures
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Celery inspection failed: {type(e).__name__}: {e}")
+        logger.warning(
+            "celery_inspection_failed",
+            error_type=type(e).__name__,
+            error=str(e),
+        )
 
         celery_stats = {
             "active_workers": 0,
