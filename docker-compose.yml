@@ -23,7 +23,7 @@ services:
     container_name: image-processor-api
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
-      - "8002:8000"  # External port 8002 (write-api uses 8000)
+      - "8004:8000"  # External port 8004 (systematic port allocation)
     volumes:
       - processor_data:/data
       - ./app:/app/app  # Development: hot reload
