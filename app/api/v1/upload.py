@@ -16,8 +16,10 @@ from app.storage import get_storage
 from app.db.sqlite import get_db
 from app.tasks.celery_app import process_image_task
 from app.core.config import settings
+from app.core.logging_config import get_logger
 
 
+logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/images", tags=["upload"])
 
 
@@ -53,19 +55,56 @@ async def upload_image(
         HTTPException: 413 if file too large
         HTTPException: 429 if rate limit exceeded
     """
+    logger.info(
+        "upload_request_received",
+        filename=file.filename,
+        bucket=bucket,
+        content_type=file.content_type,
+        content_length=content_length,
+        user_id=rate_limit["user_id"],
+    )
+
     # Validate image type via magic bytes
-    detected_mime = await validate_image_file(file)
+    try:
+        detected_mime = await validate_image_file(file)
+        logger.debug(
+            "image_validation_success",
+            filename=file.filename,
+            detected_mime=detected_mime,
+            declared_content_type=file.content_type,
+        )
+    except HTTPException as exc:
+        logger.warning(
+            "image_validation_failed",
+            filename=file.filename,
+            content_type=file.content_type,
+            error=exc.detail,
+            status_code=exc.status_code,
+        )
+        raise
 
     # Parse metadata JSON
     try:
         meta = json.loads(metadata)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "metadata_json_parse_failed",
+            metadata=metadata,
+            error=str(e),
+        )
         meta = {}
 
     # Generate unique identifiers
     job_id = str(uuid4())
     image_id = str(uuid4())
     staging_path = f"staging/{image_id}_{int(datetime.utcnow().timestamp())}"
+
+    logger.debug(
+        "upload_identifiers_generated",
+        job_id=job_id,
+        image_id=image_id,
+        staging_path=staging_path,
+    )
 
     # Augment metadata with processing info
     processing_metadata = {
@@ -77,21 +116,82 @@ async def upload_image(
     }
 
     # Create job in database
-    await db.create_job(
-        job_id=job_id,
-        image_id=image_id,
-        storage_bucket=bucket,
-        staging_path=staging_path,
-        metadata=processing_metadata
-    )
+    try:
+        await db.create_job(
+            job_id=job_id,
+            image_id=image_id,
+            storage_bucket=bucket,
+            staging_path=staging_path,
+            metadata=processing_metadata
+        )
+        logger.debug(
+            "job_created_in_database",
+            job_id=job_id,
+            image_id=image_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "job_creation_failed",
+            job_id=job_id,
+            image_id=image_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to create processing job")
 
     # Save to staging area
-    await storage.save(file.file, bucket, staging_path)
+    try:
+        await storage.save(file.file, bucket, staging_path)
+        logger.info(
+            "file_saved_to_staging",
+            job_id=job_id,
+            image_id=image_id,
+            bucket=bucket,
+            staging_path=staging_path,
+        )
+    except Exception as exc:
+        logger.error(
+            "staging_save_failed",
+            job_id=job_id,
+            image_id=image_id,
+            bucket=bucket,
+            staging_path=staging_path,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to save file to staging")
 
     # Queue processing task (async via Celery)
-    process_image_task.delay(job_id)
+    try:
+        process_image_task.delay(job_id)
+        logger.info(
+            "processing_task_queued",
+            job_id=job_id,
+            image_id=image_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "task_queue_failed",
+            job_id=job_id,
+            image_id=image_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to queue processing task")
 
     # Return 202 Accepted
+    logger.info(
+        "upload_accepted",
+        job_id=job_id,
+        image_id=image_id,
+        user_id=rate_limit["user_id"],
+        filename=file.filename,
+        rate_limit_remaining=rate_limit["remaining"],
+    )
+
     return JSONResponse(
         status_code=202,
         content={
@@ -124,10 +224,20 @@ async def get_job_status(job_id: str, db=Depends(get_db)):
     Raises:
         HTTPException: 404 if job not found
     """
+    logger.debug("job_status_query", job_id=job_id)
+
     job = await db.get_job(job_id)
 
     if not job:
+        logger.warning("job_status_not_found", job_id=job_id)
         raise HTTPException(status_code=404, detail="Job not found")
+
+    logger.info(
+        "job_status_returned",
+        job_id=job_id,
+        image_id=job["image_id"],
+        status=job["status"],
+    )
 
     return {
         "job_id": job["job_id"],
@@ -158,16 +268,31 @@ async def get_job_result(job_id: str, db=Depends(get_db)):
         HTTPException: 404 if job not found
         HTTPException: 409 if processing not completed
     """
+    logger.debug("job_result_query", job_id=job_id)
+
     job = await db.get_job(job_id)
 
     if not job:
+        logger.warning("job_result_not_found", job_id=job_id)
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job["status"] != "completed":
+        logger.warning(
+            "job_result_not_ready",
+            job_id=job_id,
+            current_status=job["status"],
+        )
         raise HTTPException(
             status_code=409,
             detail=f"Processing not completed. Current status: {job['status']}"
         )
+
+    logger.info(
+        "job_result_returned",
+        job_id=job_id,
+        image_id=job["image_id"],
+        variants_count=len(job["processed_paths"]) if job["processed_paths"] else 0,
+    )
 
     return {
         "job_id": job["job_id"],

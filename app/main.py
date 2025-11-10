@@ -3,6 +3,8 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,6 +13,11 @@ from app.core.logging_config import setup_logging, get_logger
 from app.db.sqlite import get_db
 from app.api.v1 import upload, retrieval, health, dashboard
 from app.api.middleware import RequestLoggingMiddleware, PerformanceLoggingMiddleware
+from app.api.exception_handlers import (
+    http_exception_handler,
+    validation_exception_handler,
+    general_exception_handler,
+)
 
 
 # Initialize logging system (MUST be done before any logging calls)
@@ -57,6 +64,11 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Exception handlers for structured error logging
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
 
 # Request logging and correlation ID middleware
 app.add_middleware(RequestLoggingMiddleware)

@@ -7,8 +7,10 @@ from enum import Enum
 
 from app.db.sqlite import get_db
 from app.storage import get_storage
+from app.core.logging_config import get_logger
 
 
+logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1/images", tags=["retrieval"])
 
 
@@ -41,13 +43,26 @@ async def get_image_info(
     Raises:
         HTTPException: 404 if image not found or size not available
     """
+    logger.debug(
+        "image_info_request",
+        image_id=image_id,
+        size=size.value,
+    )
+
     job = await db.get_job_by_image_id(image_id)
 
     if not job:
+        logger.warning("image_not_found", image_id=image_id)
         raise HTTPException(status_code=404, detail="Image not found")
 
     paths = job["processed_paths"]
     if size.value not in paths:
+        logger.warning(
+            "image_size_not_available",
+            image_id=image_id,
+            requested_size=size.value,
+            available_sizes=list(paths.keys()) if paths else [],
+        )
         raise HTTPException(status_code=404, detail=f"Size '{size.value}' not available")
 
     bucket = job["storage_bucket"]
@@ -55,6 +70,13 @@ async def get_image_info(
     url = await storage.get_url(bucket, path)
 
     metadata = job["processing_metadata"]
+
+    logger.info(
+        "image_info_returned",
+        image_id=image_id,
+        size=size.value,
+        bucket=bucket,
+    )
 
     return {
         "image_id": image_id,
@@ -86,9 +108,12 @@ async def get_all_image_sizes(
     Raises:
         HTTPException: 404 if image not found
     """
+    logger.debug("all_sizes_request", image_id=image_id)
+
     job = await db.get_job_by_image_id(image_id)
 
     if not job:
+        logger.warning("all_sizes_not_found", image_id=image_id)
         raise HTTPException(status_code=404, detail="Image not found")
 
     bucket = job["storage_bucket"]
@@ -98,6 +123,13 @@ async def get_all_image_sizes(
     urls = {}
     for variant, path in paths.items():
         urls[variant] = await storage.get_url(bucket, path)
+
+    logger.info(
+        "all_sizes_returned",
+        image_id=image_id,
+        variants_count=len(urls),
+        bucket=bucket,
+    )
 
     return {
         "image_id": image_id,
@@ -180,13 +212,17 @@ async def delete_image(
     Raises:
         HTTPException: 404 if image not found
     """
+    logger.info("image_deletion_request", image_id=image_id)
+
     job = await db.get_job_by_image_id(image_id)
 
     if not job:
+        logger.warning("image_deletion_not_found", image_id=image_id)
         raise HTTPException(status_code=404, detail="Image not found")
 
     bucket = job["storage_bucket"]
     deleted_count = 0
+    failed_deletions = []
 
     # Delete all processed variants
     if job["processed_paths"]:
@@ -194,19 +230,51 @@ async def delete_image(
             try:
                 await storage.delete(bucket, path)
                 deleted_count += 1
-            except Exception:
-                pass  # Continue even if some fail
+                logger.debug(
+                    "variant_deleted",
+                    image_id=image_id,
+                    variant=variant,
+                    path=path,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "variant_deletion_failed",
+                    image_id=image_id,
+                    variant=variant,
+                    path=path,
+                    error=str(exc),
+                )
+                failed_deletions.append(f"{variant}:{path}")
 
     # Delete staging file if exists
     if job["staging_path"]:
         try:
             await storage.delete(bucket, job["staging_path"])
             deleted_count += 1
-        except Exception:
-            pass
+            logger.debug(
+                "staging_file_deleted",
+                image_id=image_id,
+                staging_path=job["staging_path"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "staging_deletion_failed",
+                image_id=image_id,
+                staging_path=job["staging_path"],
+                error=str(exc),
+            )
+            failed_deletions.append(f"staging:{job['staging_path']}")
 
     # Note: Database records kept for audit trail
     # In production, consider adding 'deleted' flag instead
+
+    logger.info(
+        "image_deletion_completed",
+        image_id=image_id,
+        files_removed=deleted_count,
+        failed_deletions=len(failed_deletions),
+        failed_files=failed_deletions if failed_deletions else None,
+    )
 
     return {
         "image_id": image_id,
@@ -240,13 +308,26 @@ async def get_images_batch(
     """
     ids = [id.strip() for id in image_ids.split(',')]
 
+    logger.info(
+        "batch_retrieval_request",
+        image_count=len(ids),
+        size=size.value,
+    )
+
     if len(ids) > 50:
+        logger.warning(
+            "batch_retrieval_limit_exceeded",
+            requested_count=len(ids),
+            max_allowed=50,
+        )
         raise HTTPException(
             status_code=400,
             detail="Maximum 50 images per request. Please split into multiple requests."
         )
 
     results = []
+    failed_ids = []
+
     for image_id in ids:
         try:
             job = await db.get_job_by_image_id(image_id)
@@ -261,9 +342,23 @@ async def get_images_batch(
                     "size": size.value,
                     "dominant_color": job["processing_metadata"].get("dominant_color")
                 })
-        except Exception:
-            # Skip failed retrievals
-            continue
+            else:
+                failed_ids.append(image_id)
+        except Exception as exc:
+            logger.debug(
+                "batch_retrieval_item_failed",
+                image_id=image_id,
+                error=str(exc),
+            )
+            failed_ids.append(image_id)
+
+    logger.info(
+        "batch_retrieval_completed",
+        requested_count=len(ids),
+        found_count=len(results),
+        failed_count=len(failed_ids),
+        success_rate=round(len(results) / len(ids) * 100, 2) if ids else 0,
+    )
 
     return {
         "images": results,

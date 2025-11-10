@@ -252,10 +252,15 @@ def get_logging_config(debug: bool = False, json_logs: bool = True) -> Dict[str,
                 "level": "INFO",
                 "propagate": False,
             },
-            # Suppress noisy third-party libraries
+            # Uvicorn loggers - CRITICAL: Set propagate=False to prevent duplicates
+            "uvicorn": {
+                "handlers": ["stdout", "stderr"],
+                "level": "INFO",
+                "propagate": False,
+            },
             "uvicorn.access": {
-                "handlers": ["stdout"],
-                "level": "WARNING",  # We use custom middleware for access logs
+                "handlers": [],  # Disabled - we use custom RequestLoggingMiddleware
+                "level": "CRITICAL",  # Effectively disabled
                 "propagate": False,
             },
             "uvicorn.error": {
