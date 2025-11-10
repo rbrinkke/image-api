@@ -27,32 +27,40 @@ from structlog.types import EventDict, Processor
 from pythonjsonlogger import jsonlogger
 
 
-# Correlation ID context variable (set by middleware)
-_correlation_id_context: Optional[str] = None
+# Trace ID context variable (set by middleware)
+# Note: We use "trace_id" for observability stack compatibility
+# while maintaining "correlation_id" as an alias for backward compatibility
+_trace_id_context: Optional[str] = None
 
 
-def set_correlation_id(correlation_id: str) -> None:
-    """Set the correlation ID for the current request context.
+def set_trace_id(trace_id: str) -> None:
+    """Set the trace ID for the current request context.
 
     Called by middleware to inject request tracking ID.
     """
-    global _correlation_id_context
-    _correlation_id_context = correlation_id
+    global _trace_id_context
+    _trace_id_context = trace_id
 
 
-def get_correlation_id() -> Optional[str]:
-    """Get the current correlation ID.
+def get_trace_id() -> Optional[str]:
+    """Get the current trace ID.
 
     Returns:
-        Correlation ID if set, None otherwise
+        Trace ID if set, None otherwise
     """
-    return _correlation_id_context
+    return _trace_id_context
 
 
-def clear_correlation_id() -> None:
-    """Clear the correlation ID after request completes."""
-    global _correlation_id_context
-    _correlation_id_context = None
+def clear_trace_id() -> None:
+    """Clear the trace ID after request completes."""
+    global _trace_id_context
+    _trace_id_context = None
+
+
+# Backward compatibility aliases
+set_correlation_id = set_trace_id
+get_correlation_id = get_trace_id
+clear_correlation_id = clear_trace_id
 
 
 def add_app_context(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
@@ -61,7 +69,8 @@ def add_app_context(logger: Any, method_name: str, event_dict: EventDict) -> Eve
     Injects:
     - service: Service name
     - version: Application version
-    - correlation_id: Request tracking ID (if available)
+    - trace_id: Request tracking ID (if available)
+    - correlation_id: Alias for trace_id (backward compatibility)
     """
     from app.core.config import settings
 
@@ -69,10 +78,12 @@ def add_app_context(logger: Any, method_name: str, event_dict: EventDict) -> Eve
     event_dict["version"] = settings.VERSION
     event_dict["environment"] = settings.ENVIRONMENT
 
-    # Add correlation ID if available
-    correlation_id = get_correlation_id()
-    if correlation_id:
-        event_dict["correlation_id"] = correlation_id
+    # Add trace ID if available (primary field for observability stack)
+    trace_id = get_trace_id()
+    if trace_id:
+        event_dict["trace_id"] = trace_id
+        # Also add as correlation_id for backward compatibility
+        event_dict["correlation_id"] = trace_id
 
     return event_dict
 
@@ -151,21 +162,27 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
         """Add custom fields to JSON log record."""
         super().add_fields(log_record, record, message_dict)
 
-        # Ensure timestamp is always present
+        # Ensure timestamp is always present (ISO 8601 with timezone)
         if not log_record.get('timestamp'):
             log_record['timestamp'] = self.formatTime(record, self.datefmt)
 
-        # Ensure level is always present
+        # Ensure level is always present and uppercase
         if not log_record.get('level'):
-            log_record['level'] = record.levelname
+            log_record['level'] = record.levelname.upper()
+        else:
+            log_record['level'] = log_record['level'].upper()
 
         # Add logger name
         log_record['logger'] = record.name
 
-        # Add correlation ID if available
-        correlation_id = get_correlation_id()
-        if correlation_id and 'correlation_id' not in log_record:
-            log_record['correlation_id'] = correlation_id
+        # Add trace ID if available (primary for observability stack)
+        trace_id = get_trace_id()
+        if trace_id:
+            if 'trace_id' not in log_record:
+                log_record['trace_id'] = trace_id
+            # Also add as correlation_id for backward compatibility
+            if 'correlation_id' not in log_record:
+                log_record['correlation_id'] = trace_id
 
 
 def get_logging_config(debug: bool = False, json_logs: bool = True) -> Dict[str, Any]:

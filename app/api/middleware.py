@@ -7,6 +7,7 @@ Features:
 - Performance metrics (request duration)
 - Error tracking with context
 - Security headers logging
+- Prometheus metrics collection
 """
 
 import time
@@ -16,22 +17,23 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from app.core.logging_config import get_logger, set_correlation_id, clear_correlation_id
+from app.core.logging_config import get_logger, set_trace_id, clear_trace_id
 
 
 logger = get_logger(__name__)
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware for request correlation IDs and comprehensive logging.
+    """Middleware for request trace IDs and comprehensive logging.
 
     Functionality:
-    1. Generates unique correlation ID for each request
-    2. Injects correlation ID into logging context
+    1. Generates unique trace ID for each request
+    2. Injects trace ID into logging context
     3. Logs request details (method, path, client, headers)
     4. Logs response details (status, duration)
     5. Tracks performance metrics
     6. Handles exceptions with full context
+    7. Adds both X-Trace-ID and X-Correlation-ID headers for compatibility
     """
 
     def __init__(self, app: ASGIApp):
@@ -43,7 +45,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """Process each request with correlation ID and logging.
+        """Process each request with trace ID and logging.
 
         Args:
             request: Incoming HTTP request
@@ -52,11 +54,16 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         Returns:
             HTTP response
         """
-        # Generate correlation ID (check header first, then generate)
-        correlation_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+        # Generate trace ID (check headers first, then generate)
+        # Priority: X-Trace-ID > X-Correlation-ID > generate new UUID
+        trace_id = (
+            request.headers.get("X-Trace-ID") or
+            request.headers.get("X-Correlation-ID") or
+            str(uuid.uuid4())
+        )
 
-        # Set correlation ID in logging context
-        set_correlation_id(correlation_id)
+        # Set trace ID in logging context
+        set_trace_id(trace_id)
 
         # Start timer
         start_time = time.time()
@@ -78,7 +85,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             client_port=client_port,
             user_agent=user_agent,
             query_params=query_params,
-            correlation_id=correlation_id,
+            endpoint=path,
         )
 
         try:
@@ -93,13 +100,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "request_completed",
                 method=method,
                 path=path,
+                endpoint=path,
                 status_code=response.status_code,
                 duration_ms=round(duration_ms, 2),
-                correlation_id=correlation_id,
             )
 
-            # Add correlation ID to response headers
-            response.headers["X-Correlation-ID"] = correlation_id
+            # Add trace ID to response headers (both formats for compatibility)
+            response.headers["X-Trace-ID"] = trace_id
+            response.headers["X-Correlation-ID"] = trace_id
 
             return response
 
@@ -112,11 +120,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "request_failed",
                 method=method,
                 path=path,
+                endpoint=path,
                 client_host=client_host,
                 duration_ms=round(duration_ms, 2),
                 error_type=type(exc).__name__,
                 error_message=str(exc),
-                correlation_id=correlation_id,
                 exc_info=True,
             )
 
@@ -124,8 +132,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             raise
 
         finally:
-            # Clear correlation ID from context
-            clear_correlation_id()
+            # Clear trace ID from context
+            clear_trace_id()
 
 
 class PerformanceLoggingMiddleware(BaseHTTPMiddleware):
@@ -173,3 +181,96 @@ class PerformanceLoggingMiddleware(BaseHTTPMiddleware):
             )
 
         return response
+
+
+class PrometheusMiddleware(BaseHTTPMiddleware):
+    """Middleware for automatic Prometheus metrics collection.
+
+    Tracks:
+    - HTTP request counts by method, endpoint, and status
+    - HTTP request duration by method and endpoint
+    - Active HTTP requests by method
+    - Errors by type and endpoint
+    """
+
+    def __init__(self, app: ASGIApp):
+        """Initialize middleware.
+
+        Args:
+            app: FastAPI application instance
+        """
+        super().__init__(app)
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        """Track metrics for each request.
+
+        Args:
+            request: Incoming HTTP request
+            call_next: Next middleware/route handler
+
+        Returns:
+            HTTP response
+        """
+        # Import here to avoid circular imports
+        from app.api.v1.metrics import (
+            http_requests_total,
+            http_request_duration_seconds,
+            http_requests_in_progress,
+            errors_total,
+        )
+        from app.core.config import settings
+
+        method = request.method
+        path = request.url.path
+
+        # Skip metrics for /metrics endpoint to avoid recursion
+        if path == "/metrics":
+            return await call_next(request)
+
+        # Increment in-progress counter
+        http_requests_in_progress.labels(
+            service=settings.SERVICE_NAME,
+            method=method
+        ).inc()
+
+        start_time = time.time()
+        status_code = 500  # Default to error if something goes wrong
+
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+
+        except Exception as exc:
+            # Track errors
+            errors_total.labels(
+                service=settings.SERVICE_NAME,
+                error_type=type(exc).__name__,
+                endpoint=path
+            ).inc()
+            raise
+
+        finally:
+            # Calculate duration
+            duration = time.time() - start_time
+
+            # Decrement in-progress counter
+            http_requests_in_progress.labels(
+                service=settings.SERVICE_NAME,
+                method=method
+            ).dec()
+
+            # Record request count
+            http_requests_total.labels(
+                service=settings.SERVICE_NAME,
+                method=method,
+                endpoint=path,
+                status=status_code
+            ).inc()
+
+            # Record request duration
+            http_request_duration_seconds.labels(
+                service=settings.SERVICE_NAME,
+                method=method,
+                endpoint=path
+            ).observe(duration)
