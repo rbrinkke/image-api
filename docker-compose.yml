@@ -9,7 +9,7 @@ services:
     volumes:
       - redis_data:/data
     networks:
-      - default
+      - activity-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -62,7 +62,8 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - default
+      - activity-network
+      - activity-observability
     labels:
       # Prometheus auto-discovery
       prometheus.scrape: "true"
@@ -109,7 +110,8 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - default
+      - activity-network
+      - activity-observability
     labels:
       # Loki log collection (no Prometheus - workers don't expose metrics endpoint)
       loki.collect: "true"
@@ -133,7 +135,8 @@ services:
       - redis
       - worker
     networks:
-      - default
+      - activity-network
+      - activity-observability
     labels:
       # Loki log collection (no Prometheus - Flower has its own monitoring)
       loki.collect: "true"
@@ -154,7 +157,9 @@ volumes:
     driver: local
 
 networks:
-  # Connect to central observability stack network for auto-discovery
-  default:
+  # Central activity network for all services
+  activity-network:
     external: true
-    name: activity-observability
+  # Connect to central observability stack for metrics/logs
+  activity-observability:
+    external: true
