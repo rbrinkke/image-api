@@ -11,8 +11,8 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.logging_config import setup_logging, get_logger
 from app.db.sqlite import get_db
-from app.api.v1 import upload, retrieval, health, dashboard
-from app.api.middleware import RequestLoggingMiddleware, PerformanceLoggingMiddleware
+from app.api.v1 import upload, retrieval, health, dashboard, metrics
+from app.api.middleware import RequestLoggingMiddleware, PerformanceLoggingMiddleware, PrometheusMiddleware
 from app.api.exception_handlers import (
     http_exception_handler,
     validation_exception_handler,
@@ -70,8 +70,12 @@ app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
-# Request logging and correlation ID middleware
+# Middleware stack (order matters - first added is executed last!)
+# 1. Prometheus metrics (outermost - measures everything)
+app.add_middleware(PrometheusMiddleware)
+# 2. Request logging with correlation IDs
 app.add_middleware(RequestLoggingMiddleware)
+# 3. Performance monitoring for slow requests
 app.add_middleware(PerformanceLoggingMiddleware, slow_request_threshold_ms=1000.0)
 
 # CORS middleware configuration
@@ -89,6 +93,7 @@ app.include_router(upload.router)
 app.include_router(retrieval.router)
 app.include_router(health.router)
 app.include_router(dashboard.router)
+app.include_router(metrics.router)
 
 # Mount static files for local storage backend
 if settings.STORAGE_BACKEND == "local":

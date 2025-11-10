@@ -9,13 +9,18 @@ services:
     volumes:
       - redis_data:/data
     networks:
-      - processor_network
+      - default
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # FastAPI API Server
   api:
@@ -57,7 +62,14 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - processor_network
+      - default
+    labels:
+      # Prometheus auto-discovery
+      prometheus.scrape: "true"
+      prometheus.port: "8000"
+      prometheus.path: "/metrics"
+      # Loki log collection
+      loki.collect: "true"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 30s
@@ -65,6 +77,11 @@ services:
       retries: 3
       start_period: 40s
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Celery Worker - Image processing
   worker:
@@ -92,8 +109,16 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - processor_network
+      - default
+    labels:
+      # Loki log collection (no Prometheus - workers don't expose metrics endpoint)
+      loki.collect: "true"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Flower - Celery monitoring UI
   flower:
@@ -108,8 +133,16 @@ services:
       - redis
       - worker
     networks:
-      - processor_network
+      - default
+    labels:
+      # Loki log collection (no Prometheus - Flower has its own monitoring)
+      loki.collect: "true"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   # Persistent storage for SQLite database and processed images
@@ -121,5 +154,7 @@ volumes:
     driver: local
 
 networks:
-  processor_network:
-    driver: bridge
+  # Connect to central observability stack network for auto-discovery
+  default:
+    external: true
+    name: activity-observability
