@@ -4,20 +4,18 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import logging
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.logging_config import setup_logging, get_logger
 from app.db.sqlite import get_db
 from app.api.v1 import upload, retrieval, health, dashboard
+from app.api.middleware import RequestLoggingMiddleware, PerformanceLoggingMiddleware
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Initialize logging system (MUST be done before any logging calls)
+setup_logging(debug=settings.is_debug_mode, json_logs=settings.use_json_logs)
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -29,18 +27,25 @@ async def lifespan(app: FastAPI):
     - Logging startup information
     """
     # Startup
-    logger.info(f"Starting {settings.SERVICE_NAME} v{settings.VERSION}")
-    logger.info(f"Storage backend: {settings.STORAGE_BACKEND}")
+    logger.info(
+        "application_startup",
+        service=settings.SERVICE_NAME,
+        version=settings.VERSION,
+        environment=settings.ENVIRONMENT,
+        debug_mode=settings.is_debug_mode,
+        log_level=settings.LOG_LEVEL,
+        storage_backend=settings.STORAGE_BACKEND,
+    )
 
     # Initialize database schema
     db = get_db()
     await db.init_schema()
-    logger.info("Database initialized successfully")
+    logger.info("database_initialized", database_path=settings.DATABASE_PATH)
 
     yield
 
     # Shutdown
-    logger.info("Shutting down gracefully")
+    logger.info("application_shutdown", graceful=True)
 
 
 # Create FastAPI application
@@ -52,6 +57,10 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Request logging and correlation ID middleware
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(PerformanceLoggingMiddleware, slow_request_threshold_ms=1000.0)
 
 # CORS middleware configuration
 # IMPORTANT: Configure appropriately for production!
@@ -79,7 +88,12 @@ if settings.STORAGE_BACKEND == "local":
         StaticFiles(directory=settings.STORAGE_PATH),
         name="storage"
     )
-    logger.info(f"Static files mounted at /storage (path: {settings.STORAGE_PATH})")
+    logger.info(
+        "static_files_mounted",
+        mount_path="/storage",
+        directory=settings.STORAGE_PATH,
+        backend=settings.STORAGE_BACKEND,
+    )
 
 
 @app.get("/")

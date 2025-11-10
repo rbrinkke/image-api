@@ -2,13 +2,14 @@
 
 import aiosqlite
 import json
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from app.core.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+
+logger = get_logger(__name__)
 
 
 class ProcessorDB:
@@ -30,7 +31,11 @@ class ProcessorDB:
             with open(schema_path) as f:
                 await db.executescript(f.read())
             await db.commit()
-            logger.info(f"Database initialized at {self.db_path}")
+            logger.info(
+                "database_schema_initialized",
+                db_path=self.db_path,
+                schema_file=str(schema_path),
+            )
 
     async def create_job(
         self,

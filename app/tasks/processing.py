@@ -1,7 +1,6 @@
 """Image processing tasks for Celery workers."""
 
 from celery import shared_task
-from celery.utils.log import get_task_logger
 from PIL import Image
 import io
 import asyncio
@@ -13,10 +12,11 @@ from pydantic import BaseModel
 from app.db.sqlite import get_db
 from app.storage import get_storage
 from app.core.config import settings
+from app.core.logging_config import get_logger
 from app.tasks.celery_app import celery_app
 
 
-logger = get_task_logger(__name__)
+logger = get_logger(__name__)
 
 
 class VariantMetadata(BaseModel):
@@ -160,7 +160,7 @@ def process_image_task(self, job_id: str):
     Raises:
         Exception: Re-raises after max retries
     """
-    logger.info(f"Starting processing for job {job_id}")
+    logger.info("job_processing_started", job_id=job_id)
 
     db = get_db()
     storage = get_storage()
@@ -173,13 +173,21 @@ def process_image_task(self, job_id: str):
         job = asyncio.run(db.get_job(job_id))
 
         if not job:
-            raise ValueError(f"Job {job_id} not found in database")
+            error_msg = f"Job {job_id} not found in database"
+            logger.error("job_not_found", job_id=job_id)
+            raise ValueError(error_msg)
 
         image_id = job['image_id']
         bucket = job['storage_bucket']
         staging_path = job['staging_path']
 
-        logger.info(f"Processing image {image_id} from {staging_path}")
+        logger.info(
+            "processing_image",
+            job_id=job_id,
+            image_id=image_id,
+            bucket=bucket,
+            staging_path=staging_path,
+        )
 
         # Load raw image from staging
         raw_bytes = asyncio.run(storage.load(bucket, staging_path))
@@ -187,18 +195,29 @@ def process_image_task(self, job_id: str):
 
         # Strip EXIF metadata (security + privacy)
         image = strip_exif_metadata(image)
-        logger.info(f"EXIF metadata stripped for {image_id}")
+        logger.info("exif_stripped", image_id=image_id, job_id=job_id)
 
         # Extract dominant color
         dominant_color = extract_dominant_color(image)
-        logger.info(f"Dominant color: {dominant_color}")
+        logger.info(
+            "dominant_color_extracted",
+            image_id=image_id,
+            job_id=job_id,
+            dominant_color=dominant_color,
+        )
 
         # Process all size variants
         processed_paths = {}
         variants_metadata = {}
 
         for variant_name, max_dim in settings.IMAGE_SIZES.items():
-            logger.info(f"Generating {variant_name} variant ({max_dim}px)")
+            logger.debug(
+                "variant_generation_started",
+                job_id=job_id,
+                image_id=image_id,
+                variant=variant_name,
+                max_dimension=max_dim,
+            )
 
             webp_bytes, meta = process_variant(image, max_dim, settings.WEBP_QUALITY)
 
@@ -211,7 +230,16 @@ def process_image_task(self, job_id: str):
             processed_paths[variant_name] = webp_path
             variants_metadata[variant_name] = meta
 
-            logger.info(f"Uploaded {variant_name}: {meta.size_bytes} bytes")
+            logger.info(
+                "variant_uploaded",
+                job_id=job_id,
+                image_id=image_id,
+                variant=variant_name,
+                size_bytes=meta.size_bytes,
+                width=meta.width,
+                height=meta.height,
+                storage_path=webp_path,
+            )
 
         # Compile complete metadata using type-safe Pydantic model
         processing_result = ProcessingResult(
@@ -238,11 +266,26 @@ def process_image_task(self, job_id: str):
         # Cleanup staging file
         try:
             asyncio.run(storage.delete(bucket, staging_path))
-            logger.info(f"Cleaned up staging: {staging_path}")
+            logger.info(
+                "staging_cleanup_success",
+                job_id=job_id,
+                staging_path=staging_path,
+            )
         except Exception as e:
-            logger.warning(f"Staging cleanup failed: {e}")
+            logger.warning(
+                "staging_cleanup_failed",
+                job_id=job_id,
+                staging_path=staging_path,
+                error=str(e),
+            )
 
-        logger.info(f"Job {job_id} completed successfully")
+        logger.info(
+            "job_completed",
+            job_id=job_id,
+            image_id=image_id,
+            variants_count=len(processed_paths),
+            dominant_color=dominant_color,
+        )
 
         return {
             'job_id': job_id,
@@ -251,18 +294,34 @@ def process_image_task(self, job_id: str):
         }
 
     except Exception as exc:
-        logger.error(f"Job {job_id} failed: {exc}", exc_info=True)
+        logger.error(
+            "job_processing_failed",
+            job_id=job_id,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            exc_info=True,
+        )
 
         # Check if retry is possible
         can_retry = asyncio.run(db.can_retry(job_id))
 
         if can_retry:
             asyncio.run(db.update_job_status(job_id, 'retrying', error=str(exc)))
-            logger.info(f"Retrying job {job_id} (attempt {self.request.retries + 1})")
+            logger.info(
+                "job_retry_scheduled",
+                job_id=job_id,
+                retry_attempt=self.request.retries + 1,
+                max_retries=self.max_retries,
+            )
             raise self.retry(exc=exc)
         else:
             asyncio.run(db.update_job_status(job_id, 'failed', error=str(exc)))
-            logger.error(f"Job {job_id} permanently failed after {self.request.retries} retries")
+            logger.error(
+                "job_permanently_failed",
+                job_id=job_id,
+                retry_attempts=self.request.retries,
+                max_retries=self.max_retries,
+            )
             raise
 
 
@@ -299,12 +358,16 @@ def cleanup_old_staging_files():
                 await storage.delete(row[1], row[2])
                 cleaned += 1
             except Exception as e:
-                logger.warning(f"Could not clean {row[2]}: {e}")
+                logger.warning(
+                    "staging_file_cleanup_failed",
+                    staging_path=row[2],
+                    error=str(e),
+                )
 
         return cleaned
 
     cleaned = asyncio.run(do_cleanup())
-    logger.info(f"Cleaned {cleaned} old staging files")
+    logger.info("staging_cleanup_completed", files_cleaned=cleaned)
     return cleaned
 
 
@@ -332,7 +395,7 @@ def cleanup_old_rate_limits():
             return conn.total_changes
 
     deleted = asyncio.run(do_cleanup())
-    logger.info(f"Cleaned {deleted} old rate limit windows")
+    logger.info("rate_limits_cleanup_completed", records_deleted=deleted)
     return deleted
 
 

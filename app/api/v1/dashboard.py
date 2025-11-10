@@ -1,7 +1,6 @@
 """Technical dashboard API for system monitoring and troubleshooting."""
 
 import aiosqlite
-import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -12,10 +11,11 @@ import os
 
 from app.db.sqlite import get_db
 from app.core.config import settings
+from app.core.logging_config import get_logger
 from app.tasks.celery_app import celery_app
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 

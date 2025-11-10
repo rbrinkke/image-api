@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     # Service Identity
     SERVICE_NAME: str = "image-processor"
     VERSION: str = "1.0.0"
+    ENVIRONMENT: str = "development"  # development, staging, production
+
+    # Logging Configuration
+    LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    LOG_JSON: bool = True    # JSON logs (prod) vs pretty console (dev)
+    DEBUG: bool = False      # Enable debug mode features
 
     # Database
     DATABASE_PATH: str = "/data/processor.db"
@@ -53,6 +59,24 @@ class Settings(BaseSettings):
     CELERY_TASK_ACKS_LATE: bool = True  # Acknowledge after completion
     CELERY_WORKER_PREFETCH_MULTIPLIER: int = 1  # One task at a time
     CELERY_WORKER_MAX_TASKS_PER_CHILD: int = 50  # Restart for memory cleanup
+
+    @property
+    def is_debug_mode(self) -> bool:
+        """Check if application is in debug mode."""
+        return self.DEBUG or self.LOG_LEVEL.upper() == "DEBUG"
+
+    @property
+    def use_json_logs(self) -> bool:
+        """Determine if JSON logging should be used.
+
+        In production, always use JSON logs.
+        In development, allow override via LOG_JSON setting.
+        """
+        if self.ENVIRONMENT == "production":
+            return True
+        if self.DEBUG:
+            return self.LOG_JSON
+        return True
 
     class Config:
         """Pydantic configuration."""
