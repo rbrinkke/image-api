@@ -1,0 +1,255 @@
+# Image API Service Alerts
+# 
+# This file contains Prometheus alert rules for the Image API service.
+# To use: Add this alert group to your Prometheus alerts.yml configuration.
+#
+# Alert categories:
+# - Availability: Service health and uptime
+# - Errors: Error rates and failures
+# - Performance: Latency and throughput
+# - Processing: Image processing metrics
+# - Capacity: Resource saturation
+# - Storage: Storage backend health
+# - Database: Database performance
+# - Business: Business metrics
+
+groups:
+  - name: image_api_service
+    interval: 30s
+    rules:
+      # CRITICAL ALERTS
+      - alert: ImageAPIDown
+        expr: up{job="docker-services",container_name="image-processor-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+          service: image-api
+        annotations:
+          summary: "Image API is down"
+          description: "Image API has been down for more than 1 minute - image processing unavailable"
+
+      - alert: ImageAPICriticalErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{exported_service="image-processor",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{exported_service="image-processor"}[5m]))
+          ) > 0.15
+        for: 2m
+        labels:
+          severity: critical
+          category: errors
+          service: image-api
+        annotations:
+          summary: "Critical error rate on Image API"
+          description: "Image API has critical error rate of {{ $value | humanizePercentage }} (threshold: 15%) - severe issues!"
+
+      - alert: ImageAPICriticalSlowResponses
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{exported_service="image-processor"}[5m])) by (le)) > 5
+        for: 2m
+        labels:
+          severity: critical
+          category: performance
+          service: image-api
+        annotations:
+          summary: "Critical slow responses on Image API"
+          description: "P95 response time is {{ $value }}s (threshold: 5s) - severe performance issues!"
+
+      - alert: ImageProcessingCriticalFailureRate
+        expr: |
+          (
+            sum(rate(image_processing_jobs_total{exported_service="image-processor",status="failed"}[5m]))
+            /
+            sum(rate(image_processing_jobs_total{exported_service="image-processor"}[5m]))
+          ) > 0.25
+        for: 2m
+        labels:
+          severity: critical
+          category: processing
+          service: image-api
+        annotations:
+          summary: "Critical image processing failure rate"
+          description: "{{ $value | humanizePercentage }} of image processing jobs are failing (threshold: 25%) - major issue!"
+
+      - alert: ImageProcessingCriticalSlowProcessing
+        expr: histogram_quantile(0.95, sum(rate(image_processing_duration_seconds_bucket{exported_service="image-processor"}[5m])) by (le)) > 30
+        for: 2m
+        labels:
+          severity: critical
+          category: performance
+          service: image-api
+        annotations:
+          summary: "Critical slow image processing"
+          description: "P95 processing time is {{ $value }}s (threshold: 30s) - workers severely degraded!"
+
+      - alert: CeleryQueueCriticallySaturated
+        expr: celery_queue_length{exported_service="image-processor"} > 100
+        for: 5m
+        labels:
+          severity: critical
+          category: capacity
+          service: image-api
+        annotations:
+          summary: "Celery queue critically saturated"
+          description: "{{ $value }} tasks in queue (threshold: 100) - severe backlog, scale workers immediately!"
+
+      - alert: ImageAPIStorageOperationFailures
+        expr: rate(storage_operations_total{exported_service="image-processor",status="error"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          category: storage
+          service: image-api
+        annotations:
+          summary: "Storage operation failures on Image API"
+          description: "{{ $value }} storage operations per second are failing - check storage backend connectivity"
+
+      - alert: ImageAPIDatabaseErrors
+        expr: rate(database_queries_total{exported_service="image-processor",status="error"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          category: database
+          service: image-api
+        annotations:
+          summary: "Database errors on Image API"
+          description: "{{ $value }} database queries per second are failing - SQLite database issues"
+
+      - alert: ImageAPIWorkerDown
+        expr: up{job="docker-services",container_name="image-processor-worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+          service: image-api
+        annotations:
+          summary: "Image processing worker is down"
+          description: "Celery worker has been down for more than 1 minute - no images will be processed!"
+
+      # WARNING ALERTS
+      - alert: ImageAPIHighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{exported_service="image-processor",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{exported_service="image-processor"}[5m]))
+          ) > 0.05
+        for: 3m
+        labels:
+          severity: warning
+          category: errors
+          service: image-api
+        annotations:
+          summary: "High error rate on Image API"
+          description: "Image API error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+
+      - alert: ImageAPISlowResponses
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{exported_service="image-processor"}[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+          service: image-api
+        annotations:
+          summary: "Slow responses on Image API"
+          description: "P95 response time is {{ $value }}s (threshold: 2s) - performance degradation"
+
+      - alert: ImageProcessingFailureRate
+        expr: |
+          (
+            sum(rate(image_processing_jobs_total{exported_service="image-processor",status="failed"}[5m]))
+            /
+            sum(rate(image_processing_jobs_total{exported_service="image-processor"}[5m]))
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+          category: processing
+          service: image-api
+        annotations:
+          summary: "High image processing failure rate"
+          description: "{{ $value | humanizePercentage }} of image processing jobs are failing (threshold: 10%)"
+
+      - alert: ImageProcessingSlowProcessing
+        expr: histogram_quantile(0.95, sum(rate(image_processing_duration_seconds_bucket{exported_service="image-processor"}[5m])) by (le)) > 10
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+          service: image-api
+        annotations:
+          summary: "Slow image processing"
+          description: "P95 processing time is {{ $value }}s (threshold: 10s) - check worker performance"
+
+      - alert: CeleryQueueSaturated
+        expr: celery_queue_length{exported_service="image-processor"} > 50
+        for: 10m
+        labels:
+          severity: warning
+          category: capacity
+          service: image-api
+        annotations:
+          summary: "Celery queue is saturated"
+          description: "{{ $value }} tasks in queue (threshold: 50) - workers cannot keep up with demand"
+
+      - alert: ImageAPIRateLimitHitsIncreasing
+        expr: rate(rate_limit_rejections_total{exported_service="image-processor"}[5m]) > 5
+        for: 3m
+        labels:
+          severity: warning
+          category: capacity
+          service: image-api
+        annotations:
+          summary: "Rate limit hits increasing on Image API"
+          description: "{{ $value }} uploads per second are being rate limited - check for abuse or increase limits"
+
+      - alert: ImageAPISlowStorageOperations
+        expr: histogram_quantile(0.95, sum(rate(storage_operation_duration_seconds_bucket{exported_service="image-processor"}[5m])) by (le, operation)) > 5
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+          service: image-api
+        annotations:
+          summary: "Slow storage operations on Image API"
+          description: "P95 {{ $labels.operation }} latency is {{ $value }}s (threshold: 5s) - storage backend slow"
+
+      - alert: ImageAPISlowDatabaseQueries
+        expr: histogram_quantile(0.95, sum(rate(database_query_duration_seconds_bucket{exported_service="image-processor"}[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          category: database
+          service: image-api
+        annotations:
+          summary: "Slow database queries on Image API"
+          description: "P95 database query time is {{ $value }}s (threshold: 0.5s) - check database performance"
+
+      # INFO ALERTS
+      - alert: ImageAPIHighUploadRejectionRate
+        expr: |
+          (
+            sum(rate(image_uploads_total{exported_service="image-processor",status="rejected"}[5m]))
+            /
+            sum(rate(image_uploads_total{exported_service="image-processor"}[5m]))
+          ) > 0.20
+        for: 10m
+        labels:
+          severity: info
+          category: business
+          service: image-api
+        annotations:
+          summary: "High upload rejection rate"
+          description: "{{ $value | humanizePercentage }} of uploads are being rejected (threshold: 20%) - check file type restrictions or size limits"
+
+      - alert: ImageAPINoUploadsReceived
+        expr: sum(rate(image_uploads_total{exported_service="image-processor"}[10m])) == 0
+        for: 15m
+        labels:
+          severity: info
+          category: business
+          service: image-api
+        annotations:
+          summary: "No uploads received on Image API"
+          description: "No uploads in the last 15 minutes - unusual if service is actively used"

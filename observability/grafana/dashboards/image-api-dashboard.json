@@ -1,0 +1,653 @@
+{
+  "title": "Image API - Processing Service",
+  "uid": "image-api",
+  "tags": ["image", "api", "processing", "celery"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "30m", "1h"]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "percentile",
+        "label": "Percentile",
+        "type": "custom",
+        "current": {"text": "95", "value": "0.95"},
+        "options": [
+          {"text": "50", "value": "0.50"},
+          {"text": "95", "value": "0.95"},
+          {"text": "99", "value": "0.99"}
+        ],
+        "query": "50 : 0.50, 95 : 0.95, 99 : 0.99"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Service Health Overview",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "title": "Service Status",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "up{container_name=\"image-processor-api\"}",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}}},
+            {"type": "value", "options": {"1": {"text": "UP", "color": "green"}}}
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Requests/sec",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 5, "x": 4, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{exported_service=\"image-processor\"}[5m]))",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 5},
+              {"color": "red", "value": 20}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Success Rate",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 5, "x": 9, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "(sum(rate(http_requests_total{exported_service=\"image-processor\",status!~\"5..\"}[5m])) / sum(rate(http_requests_total{exported_service=\"image-processor\"}[5m]))) * 100",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 95},
+              {"color": "green", "value": 99}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Response Time (P$percentile)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 5, "x": 14, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "histogram_quantile($percentile, sum(rate(http_request_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le)) * 1000",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 500},
+              {"color": "red", "value": 2000}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 5,
+      "title": "Active Processing Jobs",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 5, "x": 19, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "image_processing_jobs_active{exported_service=\"image-processor\"}",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 10},
+              {"color": "red", "value": 50}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "type": "row",
+      "id": 200,
+      "title": "HTTP Metrics",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "collapsed": false
+    },
+    {
+      "id": 10,
+      "title": "Request Rate by Endpoint",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{exported_service=\"image-processor\"}[5m])) by (endpoint)",
+        "refId": "A",
+        "legendFormat": "{{endpoint}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "reqps",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 11,
+      "title": "Response Time Distribution",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le)) * 1000",
+          "refId": "A",
+          "legendFormat": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le)) * 1000",
+          "refId": "B",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le)) * 1000",
+          "refId": "C",
+          "legendFormat": "P99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ms",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 12,
+      "title": "HTTP Status Codes",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(http_requests_total{exported_service=\"image-processor\"}[5m])) by (status)",
+        "refId": "A",
+        "legendFormat": "{{status}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80},
+          "unit": "reqps",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 13,
+      "title": "Active Requests",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(http_requests_in_progress{exported_service=\"image-processor\"}) by (method)",
+        "refId": "A",
+        "legendFormat": "{{method}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "short",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "type": "row",
+      "id": 300,
+      "title": "Image Processing Metrics",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22},
+      "collapsed": false
+    },
+    {
+      "id": 20,
+      "title": "Upload Rate",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 23},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(image_uploads_total{exported_service=\"image-processor\",status=\"accepted\"}[5m]))",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 5},
+              {"color": "red", "value": 20}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 21,
+      "title": "Processing Success Rate",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 23},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "(sum(rate(image_processing_jobs_total{exported_service=\"image-processor\",status=\"completed\"}[5m])) / sum(rate(image_processing_jobs_total{exported_service=\"image-processor\"}[5m]))) * 100",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 90},
+              {"color": "green", "value": 95}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 22,
+      "title": "Avg Processing Time",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 23},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "(rate(image_processing_duration_seconds_sum{exported_service=\"image-processor\"}[5m]) / rate(image_processing_duration_seconds_count{exported_service=\"image-processor\"}[5m])) * 1000",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 2000},
+              {"color": "red", "value": 5000}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 23,
+      "title": "Celery Queue Length",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 23},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "celery_queue_length{exported_service=\"image-processor\"}",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 20},
+              {"color": "red", "value": 50}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 24,
+      "title": "Processing Jobs by Status",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 27},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(image_processing_jobs_total{exported_service=\"image-processor\"}[5m])) by (status)",
+        "refId": "A",
+        "legendFormat": "{{status}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ops",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 25,
+      "title": "Processing Time by Size",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 27},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(image_processing_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le, size)) * 1000",
+        "refId": "A",
+        "legendFormat": "{{size}} (P95)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ms",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "type": "row",
+      "id": 400,
+      "title": "Storage & Database Metrics",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35},
+      "collapsed": false
+    },
+    {
+      "id": 30,
+      "title": "Storage Operations",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(storage_operations_total{exported_service=\"image-processor\"}[5m])) by (operation, status)",
+        "refId": "A",
+        "legendFormat": "{{operation}} - {{status}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ops",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 31,
+      "title": "Storage Operation Latency",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(storage_operation_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le, operation)) * 1000",
+        "refId": "A",
+        "legendFormat": "{{operation}} (P95)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ms",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 32,
+      "title": "Database Query Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(database_queries_total{exported_service=\"image-processor\"}[5m])) by (operation, table)",
+        "refId": "A",
+        "legendFormat": "{{operation}} - {{table}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ops",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 33,
+      "title": "Database Query Latency",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(database_query_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le, operation)) * 1000",
+        "refId": "A",
+        "legendFormat": "{{operation}} (P95)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ms",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "type": "row",
+      "id": 500,
+      "title": "Celery Worker Metrics",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 52},
+      "collapsed": false
+    },
+    {
+      "id": 40,
+      "title": "Celery Task Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 53},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "sum(rate(celery_tasks_total{exported_service=\"image-processor\"}[5m])) by (task_name, status)",
+        "refId": "A",
+        "legendFormat": "{{task_name}} - {{status}}"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ops",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "last"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "id": 41,
+      "title": "Celery Task Duration",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 53},
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(celery_task_duration_seconds_bucket{exported_service=\"image-processor\"}[5m])) by (le, task_name)) * 1000",
+        "refId": "A",
+        "legendFormat": "{{task_name}} (P95)"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10},
+          "unit": "ms",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi"}
+      }
+    },
+    {
+      "type": "row",
+      "id": 600,
+      "title": "Logs",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 61},
+      "collapsed": false
+    },
+    {
+      "id": 50,
+      "title": "Recent Logs",
+      "type": "logs",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 62},
+      "datasource": {"type": "loki", "uid": "Loki"},
+      "targets": [{
+        "expr": "{container_name=\"image-processor-api\"}",
+        "refId": "A"
+      }],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    }
+  ]
+}
