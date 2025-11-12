@@ -7,6 +7,7 @@ import aiosqlite
 from app.db.sqlite import get_db
 from app.core.config import settings
 from app.core.logging_config import get_logger
+from app.core.authorization import get_authorization_service, AuthorizationService
 from app.tasks.celery_app import celery_app
 
 
@@ -153,4 +154,69 @@ async def get_failed_jobs(limit: int = 50, db=Depends(get_db)):
             for row in rows
         ],
         "total": len(rows)
+    }
+
+
+@router.get("/auth")
+async def authorization_health_check(
+    auth_service: AuthorizationService = Depends(get_authorization_service)
+):
+    """Authorization system health check.
+
+    Provides insights into:
+    - Auth-API connectivity and circuit breaker state
+    - Redis cache connection and configuration
+    - Authorization service configuration
+
+    Returns:
+        dict: Authorization system health metrics
+    """
+    # Get circuit breaker status
+    circuit_breaker_status = await auth_service.get_circuit_breaker_status()
+
+    # Check Redis connection
+    redis_healthy = False
+    redis_error = None
+    try:
+        await auth_service.redis.ping()
+        redis_healthy = True
+    except Exception as e:
+        redis_error = str(e)
+        logger.warning("auth_health_redis_check_failed", error=redis_error)
+
+    # Determine overall health
+    is_healthy = (
+        redis_healthy and
+        circuit_breaker_status["state"] != "open"
+    )
+
+    # Build response
+    return {
+        "status": "healthy" if is_healthy else "degraded",
+        "auth_api": {
+            "url": settings.AUTH_API_URL,
+            "timeout_seconds": settings.AUTH_API_TIMEOUT,
+            "circuit_breaker": {
+                "state": circuit_breaker_status["state"],
+                "failures": circuit_breaker_status.get("failures", 0),
+                "threshold": settings.CIRCUIT_BREAKER_THRESHOLD,
+                "timeout_seconds": settings.CIRCUIT_BREAKER_TIMEOUT,
+                "opened_at": circuit_breaker_status.get("opened_at")
+            }
+        },
+        "cache": {
+            "enabled": settings.AUTH_CACHE_ENABLED,
+            "redis_connection": "healthy" if redis_healthy else "down",
+            "redis_error": redis_error,
+            "ttl_config": {
+                "read_seconds": settings.AUTH_CACHE_TTL_READ,
+                "write_seconds": settings.AUTH_CACHE_TTL_WRITE,
+                "admin_seconds": settings.AUTH_CACHE_TTL_ADMIN,
+                "denied_seconds": settings.AUTH_CACHE_TTL_DENIED
+            }
+        },
+        "config": {
+            "fail_open": settings.AUTH_FAIL_OPEN
+        },
+        "timestamp": datetime.utcnow().isoformat()
     }

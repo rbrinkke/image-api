@@ -9,9 +9,10 @@ import json
 
 from app.api.dependencies import (
     verify_content_length,
-    check_rate_limit,
-    validate_image_file
+    validate_image_file,
+    require_permission
 )
+from app.core.authorization import AuthContext
 from app.storage import get_storage
 from app.db.sqlite import get_db
 from app.tasks.celery_app import process_image_task
@@ -29,7 +30,7 @@ async def upload_image(
     bucket: str = Form(...),
     metadata: Optional[str] = Form("{}"),
     content_length: int = Depends(verify_content_length),
-    rate_limit: dict = Depends(check_rate_limit),
+    auth: AuthContext = Depends(require_permission("image:upload")),
     storage=Depends(get_storage),
     db=Depends(get_db)
 ):
@@ -38,12 +39,14 @@ async def upload_image(
     Returns job_id for status polling and image_id as permanent identifier.
     Processing happens in background via Celery workers.
 
+    **Authorization**: Requires `image:upload` permission via auth-api.
+
     Args:
         file: Image file upload (JPEG, PNG, WebP)
         bucket: Target storage bucket name
         metadata: Optional JSON metadata (pass-through)
         content_length: Pre-validated content length
-        rate_limit: Rate limit check result
+        auth: Authenticated user context (with permission check)
         storage: Storage backend instance
         db: Database instance
 
@@ -54,14 +57,38 @@ async def upload_image(
         HTTPException: 415 if file type unsupported
         HTTPException: 413 if file too large
         HTTPException: 429 if rate limit exceeded
+        HTTPException: 403 if permission denied
+        HTTPException: 503 if authorization service unavailable
     """
+    # Check rate limit (after permission check)
+    rate_limit_result = await db.check_rate_limit(auth.user_id, settings.RATE_LIMIT_MAX_UPLOADS)
+
+    if not rate_limit_result["allowed"]:
+        logger.warning(
+            "upload_rate_limit_exceeded",
+            user_id=auth.user_id,
+            org_id=auth.org_id,
+            filename=file.filename,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {settings.RATE_LIMIT_MAX_UPLOADS} uploads per hour.",
+            headers={
+                "X-RateLimit-Limit": str(settings.RATE_LIMIT_MAX_UPLOADS),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": rate_limit_result["reset_at"],
+                "Retry-After": "3600"
+            }
+        )
+
     logger.info(
         "upload_request_received",
         filename=file.filename,
         bucket=bucket,
         content_type=file.content_type,
         content_length=content_length,
-        user_id=rate_limit["user_id"],
+        user_id=auth.user_id,
+        org_id=auth.org_id,
     )
 
     # Validate image type via magic bytes
@@ -109,7 +136,8 @@ async def upload_image(
     # Augment metadata with processing info
     processing_metadata = {
         **meta,
-        "uploader_id": rate_limit["user_id"],
+        "uploader_id": auth.user_id,
+        "org_id": auth.org_id,
         "original_filename": file.filename,
         "detected_mime_type": detected_mime,
         "content_length": content_length,
@@ -187,9 +215,10 @@ async def upload_image(
         "upload_accepted",
         job_id=job_id,
         image_id=image_id,
-        user_id=rate_limit["user_id"],
+        user_id=auth.user_id,
+        org_id=auth.org_id,
         filename=file.filename,
-        rate_limit_remaining=rate_limit["remaining"],
+        rate_limit_remaining=rate_limit_result["remaining"],
     )
 
     return JSONResponse(
@@ -202,8 +231,8 @@ async def upload_image(
         },
         headers={
             "X-RateLimit-Limit": str(settings.RATE_LIMIT_MAX_UPLOADS),
-            "X-RateLimit-Remaining": str(rate_limit["remaining"]),
-            "X-RateLimit-Reset": rate_limit["reset_at"]
+            "X-RateLimit-Remaining": str(rate_limit_result["remaining"]),
+            "X-RateLimit-Reset": rate_limit_result["reset_at"]
         }
     )
 

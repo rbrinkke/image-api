@@ -32,6 +32,22 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "change-this-in-production"
     JWT_ALGORITHM: str = "HS256"
 
+    # Authorization System (Distributed Cache)
+    AUTH_API_URL: str = "http://auth-api:8000"
+    AUTH_API_TIMEOUT: int = 5  # seconds
+    AUTH_CACHE_ENABLED: bool = True
+    AUTH_FAIL_OPEN: bool = False  # If True, allow access when auth-api unavailable
+
+    # Circuit Breaker Configuration
+    CIRCUIT_BREAKER_THRESHOLD: int = 5  # failures before opening circuit
+    CIRCUIT_BREAKER_TIMEOUT: int = 60  # seconds before retry
+
+    # Permission Cache TTLs (seconds)
+    AUTH_CACHE_TTL_READ: int = 300  # 5 minutes - read operations
+    AUTH_CACHE_TTL_WRITE: int = 60  # 1 minute - write operations
+    AUTH_CACHE_TTL_ADMIN: int = 30  # 30 seconds - admin operations
+    AUTH_CACHE_TTL_DENIED: int = 120  # 2 minutes - denied permissions
+
     # Rate Limiting
     RATE_LIMIT_MAX_UPLOADS: int = 50
     RATE_LIMIT_WINDOW_MINUTES: int = 60

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging, get_logger
+from app.core.authorization import get_authorization_service, close_authorization_service
 from app.db.sqlite import get_db
 from app.api.v1 import upload, retrieval, health, dashboard, metrics
 from app.api.middleware import RequestLoggingMiddleware, PerformanceLoggingMiddleware, PrometheusMiddleware
@@ -31,7 +32,9 @@ async def lifespan(app: FastAPI):
 
     Handles:
     - Database schema initialization
+    - Authorization service initialization
     - Logging startup information
+    - Graceful resource cleanup
     """
     # Startup
     logger.info(
@@ -49,9 +52,39 @@ async def lifespan(app: FastAPI):
     await db.init_schema()
     logger.info("database_initialized", database_path=settings.DATABASE_PATH)
 
+    # Initialize authorization service
+    try:
+        auth_service = await get_authorization_service()
+        logger.info(
+            "authorization_service_initialized",
+            auth_api_url=settings.AUTH_API_URL,
+            cache_enabled=settings.AUTH_CACHE_ENABLED,
+            fail_open=settings.AUTH_FAIL_OPEN,
+        )
+    except Exception as e:
+        logger.error(
+            "authorization_service_initialization_failed",
+            error=str(e),
+            exc_info=True,
+        )
+        # Continue startup even if auth service fails to initialize
+        # This allows the API to start in degraded mode
+
     yield
 
-    # Shutdown
+    # Shutdown - cleanup resources
+    logger.info("application_shutdown_initiated")
+
+    try:
+        await close_authorization_service()
+        logger.info("authorization_service_closed")
+    except Exception as e:
+        logger.error(
+            "authorization_service_cleanup_failed",
+            error=str(e),
+            exc_info=True,
+        )
+
     logger.info("application_shutdown", graceful=True)
 
 

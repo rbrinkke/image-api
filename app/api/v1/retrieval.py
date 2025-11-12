@@ -8,6 +8,8 @@ from enum import Enum
 from app.db.sqlite import get_db
 from app.storage import get_storage
 from app.core.logging_config import get_logger
+from app.api.dependencies import require_permission
+from app.core.authorization import AuthContext
 
 
 logger = get_logger(__name__)
@@ -193,6 +195,7 @@ async def serve_image_direct(
 @router.delete("/{image_id}")
 async def delete_image(
     image_id: str,
+    auth: AuthContext = Depends(require_permission("image:delete")),
     db=Depends(get_db),
     storage=Depends(get_storage)
 ):
@@ -201,8 +204,11 @@ async def delete_image(
     Removes all processed files from storage.
     Database records are retained for audit trail.
 
+    **Authorization**: Requires `image:delete` permission via auth-api.
+
     Args:
         image_id: Image identifier
+        auth: Authenticated user context (with permission check)
         db: Database instance
         storage: Storage backend
 
@@ -211,8 +217,15 @@ async def delete_image(
 
     Raises:
         HTTPException: 404 if image not found
+        HTTPException: 403 if permission denied
+        HTTPException: 503 if authorization service unavailable
     """
-    logger.info("image_deletion_request", image_id=image_id)
+    logger.info(
+        "image_deletion_request",
+        image_id=image_id,
+        user_id=auth.user_id,
+        org_id=auth.org_id,
+    )
 
     job = await db.get_job_by_image_id(image_id)
 
@@ -271,6 +284,8 @@ async def delete_image(
     logger.info(
         "image_deletion_completed",
         image_id=image_id,
+        user_id=auth.user_id,
+        org_id=auth.org_id,
         files_removed=deleted_count,
         failed_deletions=len(failed_deletions),
         failed_files=failed_deletions if failed_deletions else None,

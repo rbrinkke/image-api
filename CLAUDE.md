@@ -40,6 +40,14 @@ open http://localhost:5555            # Flower (Celery monitoring)
 # Run comprehensive test suite (50+ tests, 2-3 min)
 ./test_comprehensive.sh
 
+# Run authorization system tests (50+ tests, requires Redis)
+./test_authorization.sh
+
+# Run specific test suites (pytest)
+pytest tests/test_authorization_cache.py -v      # Cache tests (19 tests)
+pytest tests/test_circuit_breaker.py -v          # Circuit breaker (15 tests)
+pytest tests/test_authorization_integration.py -v # Integration (15 tests)
+
 # Test health endpoint
 curl http://localhost:8000/api/v1/health
 
