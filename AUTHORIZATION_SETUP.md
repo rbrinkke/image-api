@@ -202,6 +202,46 @@ docker compose logs -f api | grep authorization
 
 ## 🔍 Verification
 
+### Automated Test Suite (50+ Tests)
+
+The authorization system includes comprehensive automated tests:
+
+```bash
+# Prerequisites: Redis must be running
+docker compose up -d redis
+
+# Run all authorization tests
+pytest tests/ -v
+
+# Run specific test suites
+pytest tests/test_authorization_cache.py -v      # Cache layer (19 tests)
+pytest tests/test_circuit_breaker.py -v          # Circuit breaker (15 tests)
+pytest tests/test_authorization_integration.py -v # End-to-end (15 tests)
+
+# Run comprehensive test script (includes service checks)
+./test_authorization.sh
+```
+
+**Test Coverage**:
+- ✅ **Cache Operations**: set/get/delete, TTL expiration, key isolation
+- ✅ **Circuit Breaker**: state transitions, recovery, threshold detection
+- ✅ **Auth-API Client**: success/failure/timeout/connection errors
+- ✅ **Integration**: cache hit/miss, organization isolation, fail-open/closed
+- ✅ **Concurrency**: parallel operations, state persistence
+
+**Mock Auth-API Server** (for manual testing):
+```bash
+# Start mock Auth-API on port 8001
+python tests/mock_auth_api.py
+
+# Pre-configured test users:
+# - test-user-123 (test-org-456): image:read, image:upload, image:delete
+# - admin-user-789 (test-org-456): all permissions
+# - readonly-user-999 (test-org-456): image:read only
+```
+
+See **[tests/README.md](tests/README.md)** for complete test documentation.
+
 ### Test 1: Health Check
 
 ```bash
