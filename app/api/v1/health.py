@@ -7,7 +7,6 @@ import aiosqlite
 from app.db.sqlite import get_db
 from app.core.config import settings
 from app.core.logging_config import get_logger
-from app.core.authorization import get_authorization_service, AuthorizationService
 from app.tasks.celery_app import celery_app
 
 
@@ -158,65 +157,48 @@ async def get_failed_jobs(limit: int = 50, db=Depends(get_db)):
 
 
 @router.get("/auth")
-async def authorization_health_check(
-    auth_service: AuthorizationService = Depends(get_authorization_service)
-):
-    """Authorization system health check.
+async def authorization_health_check():
+    """OAuth 2.0 Resource Server health check.
 
-    Provides insights into:
-    - Auth-API connectivity and circuit breaker state
-    - Redis cache connection and configuration
-    - Authorization service configuration
+    Checks connectivity to the auth-api's JWKS endpoint
+    for JWT token validation.
 
     Returns:
-        dict: Authorization system health metrics
+        dict: OAuth 2.0 configuration and JWKS endpoint health
     """
-    # Get circuit breaker status
-    circuit_breaker_status = await auth_service.get_circuit_breaker_status()
+    import httpx
 
-    # Check Redis connection
-    redis_healthy = False
-    redis_error = None
+    # Check JWKS endpoint connectivity
+    jwks_healthy = False
+    jwks_error = None
+    key_count = 0
+
     try:
-        await auth_service.redis.ping()
-        redis_healthy = True
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(settings.AUTH_API_JWKS_URL)
+            response.raise_for_status()
+            jwks_data = response.json()
+            key_count = len(jwks_data.get("keys", []))
+            jwks_healthy = True
     except Exception as e:
-        redis_error = str(e)
-        logger.warning("auth_health_redis_check_failed", error=redis_error)
-
-    # Determine overall health
-    is_healthy = (
-        redis_healthy and
-        circuit_breaker_status["state"] != "open"
-    )
+        jwks_error = str(e)
+        logger.warning("jwks_health_check_failed", error=jwks_error)
 
     # Build response
     return {
-        "status": "healthy" if is_healthy else "degraded",
-        "auth_api": {
-            "url": settings.AUTH_API_URL,
-            "timeout_seconds": settings.AUTH_API_TIMEOUT,
-            "circuit_breaker": {
-                "state": circuit_breaker_status["state"],
-                "failures": circuit_breaker_status.get("failures", 0),
-                "threshold": settings.CIRCUIT_BREAKER_THRESHOLD,
-                "timeout_seconds": settings.CIRCUIT_BREAKER_TIMEOUT,
-                "opened_at": circuit_breaker_status.get("opened_at")
-            }
+        "status": "healthy" if jwks_healthy else "degraded",
+        "oauth2": {
+            "mode": "Resource Server",
+            "issuer_url": settings.AUTH_API_ISSUER_URL,
+            "jwks_url": settings.AUTH_API_JWKS_URL,
+            "audience": settings.AUTH_API_AUDIENCE,
+            "algorithm": settings.JWT_ALGORITHM,
+            "jwks_cache_ttl_seconds": settings.JWKS_CACHE_TTL,
         },
-        "cache": {
-            "enabled": settings.AUTH_CACHE_ENABLED,
-            "redis_connection": "healthy" if redis_healthy else "down",
-            "redis_error": redis_error,
-            "ttl_config": {
-                "read_seconds": settings.AUTH_CACHE_TTL_READ,
-                "write_seconds": settings.AUTH_CACHE_TTL_WRITE,
-                "admin_seconds": settings.AUTH_CACHE_TTL_ADMIN,
-                "denied_seconds": settings.AUTH_CACHE_TTL_DENIED
-            }
-        },
-        "config": {
-            "fail_open": settings.AUTH_FAIL_OPEN
+        "jwks_endpoint": {
+            "status": "healthy" if jwks_healthy else "down",
+            "error": jwks_error,
+            "public_keys_available": key_count
         },
         "timestamp": datetime.utcnow().isoformat()
     }

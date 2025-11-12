@@ -12,7 +12,7 @@ Features:
 
 import time
 import uuid
-from typing import Callable
+from typing import Callable, Optional
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
@@ -274,3 +274,237 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
                 method=method,
                 endpoint=path
             ).observe(duration)
+
+
+# ============================================================================
+# OAuth 2.0 JWT Validation Middleware
+# ============================================================================
+
+
+class JWKSManager:
+    """Manages JWKS keys with caching and automatic refresh.
+
+    Handles fetching public keys from the auth-api's JWKS endpoint
+    and caching them for efficient token validation.
+    """
+
+    def __init__(self, jwks_url: str, cache_ttl: int = 3600):
+        """Initialize JWKS manager.
+
+        Args:
+            jwks_url: URL to the JWKS endpoint
+            cache_ttl: Cache TTL in seconds (default: 1 hour)
+        """
+        self.jwks_url = jwks_url
+        self.cache_ttl = cache_ttl
+        self.keys: dict = {}
+        self.last_refresh: float = 0
+
+    async def get_key(self, kid: str):
+        """Get public key by Key ID.
+
+        Args:
+            kid: Key ID from token header
+
+        Returns:
+            JWK key object
+
+        Raises:
+            Exception: If key not found or refresh fails
+        """
+        # Check if we need to refresh keys
+        current_time = time.time()
+        if not self.keys or (current_time - self.last_refresh) > self.cache_ttl:
+            await self.refresh_keys()
+
+        if kid not in self.keys:
+            # Try one more refresh in case key was recently rotated
+            await self.refresh_keys()
+
+            if kid not in self.keys:
+                raise Exception(f"Key ID '{kid}' not found in JWKS")
+
+        return self.keys[kid]
+
+    async def refresh_keys(self):
+        """Refresh JWKS keys from auth-api.
+
+        Raises:
+            Exception: If refresh fails
+        """
+        try:
+            import httpx
+            from jose import jwk
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(self.jwks_url)
+                response.raise_for_status()
+                jwks_data = response.json()
+
+                # Parse keys
+                new_keys = {}
+                for key_data in jwks_data.get("keys", []):
+                    kid = key_data.get("kid")
+                    if kid:
+                        new_keys[kid] = jwk.construct(key_data)
+
+                self.keys = new_keys
+                self.last_refresh = time.time()
+
+                logger.info(
+                    "jwks_keys_refreshed",
+                    key_count=len(self.keys),
+                    kids=list(self.keys.keys()),
+                )
+
+        except Exception as e:
+            logger.error(
+                "jwks_refresh_failed",
+                jwks_url=self.jwks_url,
+                error=str(e),
+                exc_info=True,
+            )
+            raise Exception(f"Failed to refresh JWKS: {e}")
+
+
+class JWTAuthMiddleware(BaseHTTPMiddleware):
+    """OAuth 2.0 JWT validation middleware.
+
+    Validates JWT tokens locally using JWKS public keys from auth-api.
+    No remote API calls needed for authorization - all claims are in the token.
+
+    Flow:
+        1. Extract Bearer token from Authorization header
+        2. Get Key ID (kid) from token header
+        3. Fetch public key from JWKS (cached)
+        4. Validate token signature, expiry, issuer, audience
+        5. Store validated payload in request.state
+    """
+
+    def __init__(self, app: ASGIApp):
+        """Initialize middleware.
+
+        Args:
+            app: FastAPI application instance
+        """
+        super().__init__(app)
+        from app.core.config import settings
+
+        self.settings = settings
+        self.jwks_manager = JWKSManager(
+            jwks_url=settings.AUTH_API_JWKS_URL,
+            cache_ttl=settings.JWKS_CACHE_TTL
+        )
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        """Validate JWT token for each request.
+
+        Args:
+            request: Incoming HTTP request
+            call_next: Next middleware/route handler
+
+        Returns:
+            HTTP response
+        """
+        from jose import jwt
+        from jose.exceptions import JOSEError, ExpiredSignatureError, JWTError
+
+        # Extract token from Authorization header
+        token = self._get_token_from_header(request)
+
+        if not token:
+            # No token provided - continue without authentication
+            # Individual endpoints can require authentication via dependencies
+            request.state.authenticated = False
+            return await call_next(request)
+
+        try:
+            # Initialize JWKS keys if needed (first request)
+            if not self.jwks_manager.keys:
+                await self.jwks_manager.refresh_keys()
+
+            # Get Key ID from token header
+            unverified_header = jwt.get_unverified_header(token)
+            kid = unverified_header.get("kid")
+
+            if not kid:
+                logger.warning("jwt_missing_kid", token_header=unverified_header)
+                return self._unauthorized_response("Token header missing 'kid'")
+
+            # Get public key from JWKS
+            public_key = await self.jwks_manager.get_key(kid)
+
+            # Decode and validate token
+            payload = jwt.decode(
+                token,
+                public_key.to_dict(),
+                algorithms=[self.settings.JWT_ALGORITHM],
+                issuer=self.settings.AUTH_API_ISSUER_URL,
+                audience=self.settings.AUTH_API_AUDIENCE,
+            )
+
+            # Success - store validated payload in request state
+            request.state.authenticated = True
+            request.state.auth_payload = payload
+
+            logger.debug(
+                "jwt_validated",
+                user_id=payload.get("sub"),
+                org_id=payload.get("org_id"),
+                permissions=payload.get("permissions", []),
+            )
+
+            return await call_next(request)
+
+        except ExpiredSignatureError:
+            logger.info("jwt_expired", token_prefix=token[:20])
+            return self._unauthorized_response("Token has expired")
+
+        except JWTError as e:
+            logger.warning("jwt_invalid", error=str(e), token_prefix=token[:20])
+            return self._unauthorized_response(f"Invalid token: {e}")
+
+        except Exception as e:
+            logger.error(
+                "jwt_validation_error",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+            return self._unauthorized_response(f"Token validation failed: {e}")
+
+    def _get_token_from_header(self, request: Request) -> Optional[str]:
+        """Extract Bearer token from Authorization header.
+
+        Args:
+            request: HTTP request
+
+        Returns:
+            Token string or None
+        """
+        auth_header = request.headers.get("Authorization")
+        if not auth_header:
+            return None
+
+        parts = auth_header.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            logger.debug("malformed_auth_header", auth_header=auth_header[:50])
+            return None
+
+        return parts[1]
+
+    def _unauthorized_response(self, detail: str) -> Response:
+        """Create 401 Unauthorized response.
+
+        Args:
+            detail: Error message
+
+        Returns:
+            JSONResponse with 401 status
+        """
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=401,
+            content={"detail": detail}
+        )

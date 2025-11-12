@@ -10,10 +10,14 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging, get_logger
-from app.core.authorization import get_authorization_service, close_authorization_service
 from app.db.sqlite import get_db
 from app.api.v1 import upload, retrieval, health, dashboard, metrics
-from app.api.middleware import RequestLoggingMiddleware, PerformanceLoggingMiddleware, PrometheusMiddleware
+from app.api.middleware import (
+    RequestLoggingMiddleware,
+    PerformanceLoggingMiddleware,
+    PrometheusMiddleware,
+    JWTAuthMiddleware
+)
 from app.api.exception_handlers import (
     http_exception_handler,
     validation_exception_handler,
@@ -52,39 +56,19 @@ async def lifespan(app: FastAPI):
     await db.init_schema()
     logger.info("database_initialized", database_path=settings.DATABASE_PATH)
 
-    # Initialize authorization service
-    try:
-        auth_service = await get_authorization_service()
-        logger.info(
-            "authorization_service_initialized",
-            auth_api_url=settings.AUTH_API_URL,
-            cache_enabled=settings.AUTH_CACHE_ENABLED,
-            fail_open=settings.AUTH_FAIL_OPEN,
-        )
-    except Exception as e:
-        logger.error(
-            "authorization_service_initialization_failed",
-            error=str(e),
-            exc_info=True,
-        )
-        # Continue startup even if auth service fails to initialize
-        # This allows the API to start in degraded mode
+    # OAuth 2.0 configuration
+    logger.info(
+        "oauth2_resource_server_initialized",
+        issuer_url=settings.AUTH_API_ISSUER_URL,
+        jwks_url=settings.AUTH_API_JWKS_URL,
+        audience=settings.AUTH_API_AUDIENCE,
+        jwt_algorithm=settings.JWT_ALGORITHM,
+    )
 
     yield
 
     # Shutdown - cleanup resources
     logger.info("application_shutdown_initiated")
-
-    try:
-        await close_authorization_service()
-        logger.info("authorization_service_closed")
-    except Exception as e:
-        logger.error(
-            "authorization_service_cleanup_failed",
-            error=str(e),
-            exc_info=True,
-        )
-
     logger.info("application_shutdown", graceful=True)
 
 
@@ -110,6 +94,8 @@ app.add_middleware(PrometheusMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 # 3. Performance monitoring for slow requests
 app.add_middleware(PerformanceLoggingMiddleware, slow_request_threshold_ms=1000.0)
+# 4. JWT Authentication (validates tokens and stores payload in request.state)
+app.add_middleware(JWTAuthMiddleware)
 
 # CORS middleware configuration
 # IMPORTANT: Configure appropriately for production!
