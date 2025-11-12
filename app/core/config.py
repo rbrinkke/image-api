@@ -28,25 +28,25 @@ class Settings(BaseSettings):
     # Celery & Redis
     REDIS_URL: str = "redis://redis:6379/0"
 
-    # Security
-    JWT_SECRET_KEY: str = "change-this-in-production"
-    JWT_ALGORITHM: str = "HS256"
+    # Security - OAuth 2.0 Resource Server Configuration
+    # The image-api acts as an OAuth 2.0 Resource Server
+    # Tokens are validated locally using the auth-api's public JWKS endpoint
 
-    # Authorization System (Distributed Cache)
-    AUTH_API_URL: str = "http://auth-api:8000"
-    AUTH_API_TIMEOUT: int = 5  # seconds
-    AUTH_CACHE_ENABLED: bool = True
-    AUTH_FAIL_OPEN: bool = False  # If True, allow access when auth-api unavailable
+    # Auth API Configuration
+    AUTH_API_ISSUER_URL: str = "http://auth-api:8000"
+    AUTH_API_JWKS_URL: str = "http://auth-api:8000/.well-known/jwks.json"
 
-    # Circuit Breaker Configuration
-    CIRCUIT_BREAKER_THRESHOLD: int = 5  # failures before opening circuit
-    CIRCUIT_BREAKER_TIMEOUT: int = 60  # seconds before retry
+    # Expected audience for this service
+    AUTH_API_AUDIENCE: str = "image-api"
 
-    # Permission Cache TTLs (seconds)
-    AUTH_CACHE_TTL_READ: int = 300  # 5 minutes - read operations
-    AUTH_CACHE_TTL_WRITE: int = 60  # 1 minute - write operations
-    AUTH_CACHE_TTL_ADMIN: int = 30  # 30 seconds - admin operations
-    AUTH_CACHE_TTL_DENIED: int = 120  # 2 minutes - denied permissions
+    # JWT algorithm (RS256 for asymmetric key validation)
+    JWT_ALGORITHM: str = "RS256"
+
+    # JWKS caching (in seconds) - how often to refresh public keys
+    JWKS_CACHE_TTL: int = 3600  # 1 hour
+
+    # Backward compatibility - old symmetric key (deprecated, used for testing only)
+    JWT_SECRET_KEY: str = "change-this-in-production"  # DEPRECATED: Only for testing
 
     # Rate Limiting
     RATE_LIMIT_MAX_UPLOADS: int = 50
