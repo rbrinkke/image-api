@@ -30,23 +30,18 @@ class Settings(BaseSettings):
 
     # Security - OAuth 2.0 Resource Server Configuration
     # The image-api acts as an OAuth 2.0 Resource Server
-    # Tokens are validated locally using the auth-api's public JWKS endpoint
+    # Tokens are validated locally using shared secret (HS256)
 
     # Auth API Configuration
-    AUTH_API_ISSUER_URL: str = "http://auth-api:8000"
-    AUTH_API_JWKS_URL: str = "http://auth-api:8000/.well-known/jwks.json"
+    AUTH_API_ISSUER_URL: str = "http://localhost:8000"  # Must match Auth API issuer
+    AUTH_API_URL: str = "http://auth-api:8000"  # Internal service URL
 
-    # Expected audience for this service
-    AUTH_API_AUDIENCE: str = "image-api"
+    # Expected audience for this service (must match token's "aud" claim)
+    AUTH_API_AUDIENCE: str = "https://api.activity.com"  # Must match Auth API audience
 
-    # JWT algorithm (RS256 for asymmetric key validation)
-    JWT_ALGORITHM: str = "RS256"
-
-    # JWKS caching (in seconds) - how often to refresh public keys
-    JWKS_CACHE_TTL: int = 3600  # 1 hour
-
-    # Backward compatibility - old symmetric key (deprecated, used for testing only)
-    JWT_SECRET_KEY: str = "change-this-in-production"  # DEPRECATED: Only for testing
+    # JWT Configuration (HS256 - shared secret)
+    JWT_SECRET_KEY: str = "change-this-in-production"  # CRITICAL: Must match Auth API secret
+    JWT_ALGORITHM: str = "HS256"  # Shared secret algorithm
 
     # Rate Limiting
     RATE_LIMIT_MAX_UPLOADS: int = 50

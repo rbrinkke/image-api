@@ -160,45 +160,51 @@ async def get_failed_jobs(limit: int = 50, db=Depends(get_db)):
 async def authorization_health_check():
     """OAuth 2.0 Resource Server health check.
 
-    Checks connectivity to the auth-api's JWKS endpoint
-    for JWT token validation.
+    Validates OAuth 2.0 configuration for JWT token validation.
+    Uses HS256 shared secret - no JWKS endpoint needed.
 
     Returns:
-        dict: OAuth 2.0 configuration and JWKS endpoint health
+        dict: OAuth 2.0 configuration and validation status
     """
     import httpx
 
-    # Check JWKS endpoint connectivity
-    jwks_healthy = False
-    jwks_error = None
-    key_count = 0
+    # Check Auth API connectivity
+    auth_api_healthy = False
+    auth_api_error = None
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(settings.AUTH_API_JWKS_URL)
+            response = await client.get(f"{settings.AUTH_API_URL}/health")
             response.raise_for_status()
-            jwks_data = response.json()
-            key_count = len(jwks_data.get("keys", []))
-            jwks_healthy = True
+            auth_api_healthy = True
     except Exception as e:
-        jwks_error = str(e)
-        logger.warning("jwks_health_check_failed", error=jwks_error)
+        auth_api_error = str(e)
+        logger.warning("auth_api_health_check_failed", error=auth_api_error)
+
+    # Check JWT configuration
+    jwt_configured = bool(settings.JWT_SECRET_KEY and settings.JWT_SECRET_KEY != "change-this-in-production")
+
+    # Overall status
+    status = "healthy" if (auth_api_healthy and jwt_configured) else "degraded"
 
     # Build response
     return {
-        "status": "healthy" if jwks_healthy else "degraded",
+        "status": status,
         "oauth2": {
             "mode": "Resource Server",
+            "validation_method": "HS256 Shared Secret",
             "issuer_url": settings.AUTH_API_ISSUER_URL,
-            "jwks_url": settings.AUTH_API_JWKS_URL,
+            "auth_api_url": settings.AUTH_API_URL,
             "audience": settings.AUTH_API_AUDIENCE,
             "algorithm": settings.JWT_ALGORITHM,
-            "jwks_cache_ttl_seconds": settings.JWKS_CACHE_TTL,
         },
-        "jwks_endpoint": {
-            "status": "healthy" if jwks_healthy else "down",
-            "error": jwks_error,
-            "public_keys_available": key_count
+        "auth_api": {
+            "status": "healthy" if auth_api_healthy else "down",
+            "error": auth_api_error,
+        },
+        "configuration": {
+            "jwt_secret_configured": jwt_configured,
+            "algorithm": settings.JWT_ALGORITHM,
         },
         "timestamp": datetime.utcnow().isoformat()
     }

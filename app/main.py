@@ -56,11 +56,12 @@ async def lifespan(app: FastAPI):
     await db.init_schema()
     logger.info("database_initialized", database_path=settings.DATABASE_PATH)
 
-    # OAuth 2.0 configuration
+    # OAuth 2.0 Resource Server configuration (HS256 shared secret)
     logger.info(
         "oauth2_resource_server_initialized",
+        validation_method="HS256 Shared Secret",
         issuer_url=settings.AUTH_API_ISSUER_URL,
-        jwks_url=settings.AUTH_API_JWKS_URL,
+        auth_api_url=settings.AUTH_API_URL,
         audience=settings.AUTH_API_AUDIENCE,
         jwt_algorithm=settings.JWT_ALGORITHM,
     )
