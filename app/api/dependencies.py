@@ -4,13 +4,20 @@ from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 import magic
-from typing import Optional
+from typing import Optional, Callable
 
 from app.core.config import settings
+from app.core.authorization import (
+    AuthContext,
+    get_authorization_service,
+    AuthorizationService
+)
+from app.core.logging_config import get_logger
 from app.db.sqlite import get_db
 
 
 security = HTTPBearer()
+logger = get_logger(__name__)
 
 
 async def verify_content_length(
@@ -139,3 +146,151 @@ async def validate_image_file(file) -> str:
         )
 
     return mime
+
+
+# ============================================================================
+# Authorization Dependencies (New)
+# ============================================================================
+
+
+async def get_auth_context(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> AuthContext:
+    """Extract and validate user context from JWT token.
+
+    Extracts minimal claims: user_id (sub), org_id, email, name.
+    Does NOT extract groups/permissions - authorization happens via auth-api + cache.
+
+    Args:
+        credentials: HTTP Bearer token credentials
+
+    Returns:
+        AuthContext: User context with user_id, org_id, email, name
+
+    Raises:
+        HTTPException: 401 if token is invalid, expired, or missing required claims
+    """
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM]
+        )
+
+        user_id = payload.get("sub")
+        org_id = payload.get("org_id")
+
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: missing user_id (sub)"
+            )
+
+        # BACKWARDS COMPATIBILITY: If org_id not in token, use default
+        # This allows old tokens to still work during migration
+        if not org_id:
+            org_id = "default-org"
+            logger.warning(
+                "jwt_missing_org_id",
+                user_id=user_id,
+                message="Token missing org_id - using default. Update JWT issuer to include org_id."
+            )
+
+        return AuthContext(
+            user_id=user_id,
+            org_id=org_id,
+            email=payload.get("email"),
+            name=payload.get("name")
+        )
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired"
+        )
+    except jwt.InvalidTokenError as e:
+        logger.warning("jwt_validation_failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+
+
+def require_permission(
+    permission: str,
+    custom_cache_ttl: Optional[int] = None
+) -> Callable:
+    """Dependency factory for permission-based authorization.
+
+    Creates a FastAPI dependency that checks if authenticated user has
+    the required permission via auth-api (with Redis caching).
+
+    Usage in endpoint:
+        @router.post("/upload")
+        async def upload_image(
+            file: UploadFile,
+            auth: AuthContext = Depends(require_permission("image:upload"))
+        ):
+            # User is authorized - proceed
+            logger.info("upload", user_id=auth.user_id, org_id=auth.org_id)
+            ...
+
+    Args:
+        permission: Required permission (e.g., "image:upload", "image:read")
+        custom_cache_ttl: Override default cache TTL for this permission (optional)
+
+    Returns:
+        Callable: FastAPI dependency function
+    """
+    async def _check_permission(
+        auth_context: AuthContext = Depends(get_auth_context),
+        auth_service: AuthorizationService = Depends(get_authorization_service)
+    ) -> AuthContext:
+        """Check if user has required permission.
+
+        Args:
+            auth_context: Authenticated user context
+            auth_service: Authorization service
+
+        Returns:
+            AuthContext: User context (if authorized)
+
+        Raises:
+            HTTPException: 403 if permission denied, 503 if auth unavailable
+        """
+        try:
+            await auth_service.check_permission(
+                auth_context.org_id,
+                auth_context.user_id,
+                permission,
+                custom_cache_ttl
+            )
+
+            # Permission granted
+            return auth_context
+
+        except Exception as e:
+            error_msg = str(e)
+
+            # Determine appropriate HTTP status code
+            if "unavailable" in error_msg.lower():
+                status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            else:
+                status_code = status.HTTP_403_FORBIDDEN
+
+            logger.warning(
+                "authorization_failed",
+                org_id=auth_context.org_id,
+                user_id=auth_context.user_id,
+                permission=permission,
+                error=error_msg,
+                status_code=status_code,
+            )
+
+            raise HTTPException(
+                status_code=status_code,
+                detail=error_msg
+            )
+
+    return _check_permission
