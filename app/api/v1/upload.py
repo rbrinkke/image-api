@@ -1,6 +1,6 @@
 """Upload API endpoints for image processing."""
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from uuid import uuid4
 from typing import Optional

@@ -474,10 +474,7 @@ class AuthAPIClient:
 
             if response.status_code == 200:
                 # Permission granted
-                result = PermissionCheckResult(
-                    allowed=True,
-                    **response.json()
-                )
+                result = PermissionCheckResult(**response.json())
 
                 await self.circuit_breaker.record_success()
 
@@ -492,9 +489,11 @@ class AuthAPIClient:
 
             elif response.status_code == 403:
                 # Permission denied (API call succeeded, but permission denied)
+                response_data = response.json()
                 result = PermissionCheckResult(
-                    allowed=False,
-                    reason=response.json().get("reason", "permission_denied")
+                    allowed=response_data.get("allowed", False),
+                    reason=response_data.get("reason", "permission_denied"),
+                    groups=response_data.get("groups")
                 )
 
                 await self.circuit_breaker.record_success()  # API call succeeded

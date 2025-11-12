@@ -164,13 +164,30 @@ async def serve_image_direct(
     Raises:
         HTTPException: 404 if image or size not found
     """
+    logger.debug(
+        "direct_image_request",
+        image_id=image_id,
+        size=size.value,
+    )
+
     job = await db.get_job_by_image_id(image_id)
 
     if not job:
+        logger.warning(
+            "direct_image_not_found",
+            image_id=image_id,
+            size=size.value,
+        )
         raise HTTPException(status_code=404, detail="Image not found")
 
     paths = job["processed_paths"]
     if size.value not in paths:
+        logger.warning(
+            "direct_image_size_not_available",
+            image_id=image_id,
+            size=size.value,
+            available_sizes=list(paths.keys()),
+        )
         raise HTTPException(status_code=404, detail=f"Size '{size.value}' not available")
 
     bucket = job["storage_bucket"]
@@ -179,6 +196,13 @@ async def serve_image_direct(
     # Local storage: serve file directly
     if hasattr(storage, 'get_local_path'):
         local_path = storage.get_local_path(bucket, path)
+        logger.info(
+            "direct_image_served_local",
+            image_id=image_id,
+            size=size.value,
+            local_path=str(local_path),
+            cache_control="public, max-age=31536000, immutable",
+        )
         return FileResponse(
             local_path,
             media_type="image/webp",
@@ -189,6 +213,12 @@ async def serve_image_direct(
     # S3 storage: redirect to presigned URL
     else:
         url = await storage.get_url(bucket, path, expires_in=3600)
+        logger.info(
+            "direct_image_redirected_s3",
+            image_id=image_id,
+            size=size.value,
+            expires_in=3600,
+        )
         return RedirectResponse(url=url, status_code=307)
 
 
