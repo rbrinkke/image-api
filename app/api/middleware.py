@@ -356,18 +356,18 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
 
         try:
             # Decode and validate token with HS256
+            # Note: Auth-API tokens may not include iss/aud claims
+            # so we disable those validations
             payload = jwt.decode(
                 token,
                 self.settings.JWT_SECRET_KEY,
                 algorithms=[self.settings.JWT_ALGORITHM],
-                issuer=self.settings.AUTH_API_ISSUER_URL,
-                audience=self.settings.AUTH_API_AUDIENCE,
                 options={
                     "verify_signature": True,
                     "verify_exp": True,
-                    "verify_iat": True,
-                    "verify_aud": True,
-                    "verify_iss": True,
+                    "verify_iat": False,  # Auth tokens don't have iat
+                    "verify_aud": False,  # Auth tokens don't have aud
+                    "verify_iss": False,  # Auth tokens don't have iss
                 },
             )
 

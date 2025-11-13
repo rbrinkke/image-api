@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   # Redis - Message broker and result backend for Celery

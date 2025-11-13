@@ -1,0 +1,401 @@
+{
+  "migration_name": "Image-API OAuth 2.0 Integration",
+  "version": "1.0.0",
+  "created": "2025-11-13",
+  "target_completion": "2 hours",
+  "phases": [
+    {
+      "phase": 1,
+      "name": "OAuth Client Registration",
+      "description": "Register image-api-service as OAuth client in auth-api",
+      "tasks": [
+        {
+          "task_id": "1.1",
+          "name": "Verify auth-api accessibility",
+          "command": "curl http://localhost:8000/health",
+          "expected_output": "{\"status\":\"healthy\"}",
+          "on_failure": "Start auth-api container: docker compose up -d auth-api",
+          "status": "pending"
+        },
+        {
+          "task_id": "1.2",
+          "name": "Register OAuth client in database",
+          "command": "docker exec auth-db psql -U postgres -d activitydb -c \"INSERT INTO activity.oauth_clients (client_id, client_secret, client_name, redirect_uris, grant_types, scopes, is_active) VALUES ('image-api-service', 'your-image-service-secret-change-in-production', 'Image API Service', '{}', ARRAY['client_credentials'], ARRAY['users:read', 'organizations:read'], true);\"",
+          "expected_output": "INSERT 0 1",
+          "verification": "docker exec auth-db psql -U postgres -d activitydb -c \"SELECT client_id, scopes FROM activity.oauth_clients WHERE client_id = 'image-api-service';\"",
+          "on_failure": "Check if client already exists, delete and retry",
+          "status": "pending"
+        },
+        {
+          "task_id": "1.3",
+          "name": "Test client credentials grant",
+          "command": "curl -X POST http://localhost:8000/oauth/token -H 'Content-Type: application/x-www-form-urlencoded' -d 'grant_type=client_credentials&client_id=image-api-service&client_secret=your-image-service-secret-change-in-production&scope=users:read organizations:read'",
+          "expected_output": "Contains access_token field",
+          "verification": "echo $TOKEN | cut -d'.' -f2 | base64 -d | jq '.sub' should return 'image-api-service'",
+          "on_failure": "Check auth-api logs: docker logs auth-api --tail 50",
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "Service token acquired with correct sub claim",
+      "dependencies": []
+    },
+    {
+      "phase": 2,
+      "name": "Install Dependencies",
+      "description": "Add OAuth libraries to image-api",
+      "tasks": [
+        {
+          "task_id": "2.1",
+          "name": "Add python-jose to requirements.txt",
+          "files_to_modify": ["/mnt/d/activity/image-api/requirements.txt"],
+          "additions": ["python-jose[cryptography]==3.3.0", "python-multipart==0.0.6"],
+          "verification": "grep 'python-jose' requirements.txt",
+          "status": "pending"
+        },
+        {
+          "task_id": "2.2",
+          "name": "Install dependencies",
+          "command": "pip install -r requirements.txt",
+          "verification": "python -c 'from jose import jwt; print(\"OK\")'",
+          "expected_output": "OK",
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "jose library importable",
+      "dependencies": []
+    },
+    {
+      "phase": 3,
+      "name": "Create OAuth Validator",
+      "description": "Copy and adapt oauth_validator.py from chat-api",
+      "tasks": [
+        {
+          "task_id": "3.1",
+          "name": "Copy oauth_validator.py from chat-api",
+          "command": "cp /mnt/d/activity/chat-api/app/core/oauth_validator.py /mnt/d/activity/image-api/app/core/oauth_validator.py",
+          "verification": "test -f /mnt/d/activity/image-api/app/core/oauth_validator.py",
+          "status": "pending"
+        },
+        {
+          "task_id": "3.2",
+          "name": "Update config.py with OAuth settings",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/config.py"],
+          "required_fields": ["JWT_SECRET", "JWT_ALGORITHM", "AUTH_API_URL"],
+          "verification": "python -c 'from app.config import settings; print(settings.JWT_SECRET)'",
+          "status": "pending"
+        },
+        {
+          "task_id": "3.3",
+          "name": "Create dependencies.py with OAuth functions",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/dependencies.py"],
+          "functions_to_add": ["get_current_principal", "get_current_user", "get_service_principal"],
+          "verification": "python -c 'from app.dependencies import get_current_principal; print(\"OK\")'",
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "OAuth validator importable and dependencies defined",
+      "dependencies": ["phase_2"]
+    },
+    {
+      "phase": 4,
+      "name": "Update Data Models",
+      "description": "Add multi-tenant fields to Image model",
+      "tasks": [
+        {
+          "task_id": "4.1",
+          "name": "Add org_id and user_id to Image model",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/models/image.py"],
+          "fields_to_add": ["org_id: str", "user_id: str", "visibility: str = 'private'"],
+          "verification": "python -c 'from app.models.image import Image; print(Image.model_fields.keys())'",
+          "expected_output": "Contains org_id, user_id, visibility",
+          "status": "pending"
+        },
+        {
+          "task_id": "4.2",
+          "name": "Create MongoDB indexes",
+          "command": "docker exec image-api-mongodb mongosh image_db --eval 'db.images.createIndex({org_id: 1}); db.images.createIndex({user_id: 1}); db.images.createIndex({org_id: 1, user_id: 1}); db.images.createIndex({org_id: 1, visibility: 1});'",
+          "verification": "docker exec image-api-mongodb mongosh image_db --eval 'db.images.getIndexes()' | grep org_id",
+          "expected_output": "Shows 4 indexes including org_id",
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "Image model has multi-tenant fields and indexes created",
+      "dependencies": []
+    },
+    {
+      "phase": 5,
+      "name": "Update API Routes",
+      "description": "Add OAuth authentication to all endpoints",
+      "tasks": [
+        {
+          "task_id": "5.1",
+          "name": "Update upload endpoint with OAuth",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/routes/images.py"],
+          "changes": [
+            "Add: from app.dependencies import get_current_user",
+            "Add parameter: principal: dict = Depends(get_current_user)",
+            "Extract: user_id = principal['user_id'], org_id = principal['org_id']",
+            "Set: image.org_id = org_id, image.user_id = user_id"
+          ],
+          "verification": "grep 'get_current_user' app/routes/images.py",
+          "status": "pending"
+        },
+        {
+          "task_id": "5.2",
+          "name": "Update list images endpoint",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/routes/images.py"],
+          "changes": [
+            "Add OAuth dependency",
+            "Filter by: user_id OR (visibility='org' AND org_id)"
+          ],
+          "verification": "Test returns only user's images",
+          "status": "pending"
+        },
+        {
+          "task_id": "5.3",
+          "name": "Update get image endpoint with authorization",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/routes/images.py"],
+          "changes": [
+            "Add OAuth dependency",
+            "Check: user_id match OR org visibility OR public"
+          ],
+          "verification": "Test 403 for unauthorized access",
+          "status": "pending"
+        },
+        {
+          "task_id": "5.4",
+          "name": "Add service cleanup endpoint",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/routes/images.py"],
+          "changes": [
+            "New endpoint: DELETE /cleanup",
+            "Dependency: get_service_principal",
+            "Delete images older than N days"
+          ],
+          "verification": "Test with service token returns deleted_count",
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "All endpoints use OAuth authentication and authorization",
+      "dependencies": ["phase_3", "phase_4"]
+    },
+    {
+      "phase": 6,
+      "name": "Environment Configuration",
+      "description": "Update .env and config for OAuth",
+      "tasks": [
+        {
+          "task_id": "6.1",
+          "name": "Update .env file",
+          "files_to_modify": ["/mnt/d/activity/image-api/.env"],
+          "variables_to_add": [
+            "JWT_SECRET=your-secret-key-change-in-production",
+            "JWT_ALGORITHM=HS256",
+            "AUTH_API_URL=http://auth-api:8000",
+            "IMAGE_SERVICE_CLIENT_ID=image-api-service",
+            "IMAGE_SERVICE_CLIENT_SECRET=your-image-service-secret-change-in-production",
+            "IMAGE_SERVICE_SCOPES=users:read organizations:read"
+          ],
+          "critical_note": "JWT_SECRET MUST match auth-api .env",
+          "status": "pending"
+        },
+        {
+          "task_id": "6.2",
+          "name": "Update config.py",
+          "files_to_modify": ["/mnt/d/activity/image-api/app/config.py"],
+          "changes": [
+            "Add all OAuth settings fields",
+            "Load from .env via pydantic_settings"
+          ],
+          "verification": "python -c 'from app.config import settings; print(settings.JWT_SECRET)'",
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "Environment variables loaded correctly",
+      "dependencies": []
+    },
+    {
+      "phase": 7,
+      "name": "Docker Rebuild and Deploy",
+      "description": "Rebuild container with OAuth changes",
+      "tasks": [
+        {
+          "task_id": "7.1",
+          "name": "Stop existing container",
+          "command": "cd /mnt/d/activity/image-api && docker compose stop image-api",
+          "expected_output": "Container stopped",
+          "status": "pending"
+        },
+        {
+          "task_id": "7.2",
+          "name": "Rebuild with --no-cache",
+          "command": "docker compose build --no-cache image-api",
+          "expected_output": "Successfully built",
+          "critical_note": "--no-cache is MANDATORY to apply code changes",
+          "status": "pending"
+        },
+        {
+          "task_id": "7.3",
+          "name": "Start container",
+          "command": "docker compose up -d image-api",
+          "expected_output": "Container started",
+          "status": "pending"
+        },
+        {
+          "task_id": "7.4",
+          "name": "Verify startup",
+          "command": "docker logs image-api --tail 20",
+          "expected_output": "No errors, shows 'Application startup complete'",
+          "verification": "curl http://localhost:8002/health",
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "Container running with OAuth code",
+      "dependencies": ["phase_5", "phase_6"]
+    },
+    {
+      "phase": 8,
+      "name": "Testing and Verification",
+      "description": "End-to-end OAuth testing",
+      "tasks": [
+        {
+          "task_id": "8.1",
+          "name": "Get Alice and Bob tokens",
+          "test_users": [
+            {
+              "email": "alice.admin@example.com",
+              "password": "SecurePass123!Admin",
+              "org_id": "f9aafe3b-9df3-4b29-9ae6-4f135c214fb0",
+              "expected_user_id": "4c52f4f6-6afe-4203-8761-9d30f0382695"
+            },
+            {
+              "email": "bob.developer@example.com",
+              "password": "DevSecure2024!Bob",
+              "org_id": "f9aafe3b-9df3-4b29-9ae6-4f135c214fb0",
+              "expected_user_id": "5b6b84b5-01fe-46b1-827a-ed23548ac59c"
+            }
+          ],
+          "verification": "Both users return access_token",
+          "status": "pending"
+        },
+        {
+          "task_id": "8.2",
+          "name": "Test Alice uploads private image",
+          "command": "curl -X POST http://localhost:8002/api/images/upload -H 'Authorization: Bearer $ALICE_TOKEN' -F 'file=@test.jpg' -F 'visibility=private'",
+          "expected_output": "Returns image with id",
+          "mongodb_verification": "db.images.findOne({_id: ObjectId('...')}) shows org_id and user_id",
+          "status": "pending"
+        },
+        {
+          "task_id": "8.3",
+          "name": "Test Bob cannot access Alice's private image",
+          "command": "curl -X GET http://localhost:8002/api/images/$ALICE_IMAGE_ID -H 'Authorization: Bearer $BOB_TOKEN'",
+          "expected_output": "{\"detail\":\"Access denied\"} with status 403",
+          "reason": "Different user_id and visibility=private",
+          "status": "pending"
+        },
+        {
+          "task_id": "8.4",
+          "name": "Test org-shared image access",
+          "command": "curl -X POST http://localhost:8002/api/images/upload -H 'Authorization: Bearer $ALICE_TOKEN' -F 'file=@test.jpg' -F 'visibility=org'",
+          "verification": "Bob can access (same org_id): curl -X GET http://localhost:8002/api/images/$ORG_IMAGE_ID -H 'Authorization: Bearer $BOB_TOKEN'",
+          "expected_output": "Returns image object with status 200",
+          "status": "pending"
+        },
+        {
+          "task_id": "8.5",
+          "name": "Test service token cleanup",
+          "command": "curl -X DELETE 'http://localhost:8002/api/images/cleanup?days=365' -H 'Authorization: Bearer $SERVICE_TOKEN'",
+          "expected_output": "{\"deleted_count\": N, \"cutoff_date\": \"...\"}",
+          "verification": "Service token bypasses org restrictions",
+          "status": "pending"
+        },
+        {
+          "task_id": "8.6",
+          "name": "MongoDB multi-tenant verification",
+          "command": "docker exec image-api-mongodb mongosh image_db --eval 'db.images.aggregate([{$group: {_id: {org_id: \"$org_id\", user_id: \"$user_id\"}, count: {$sum: 1}}}])'",
+          "expected_output": "Shows image counts grouped by org_id and user_id",
+          "verification_points": [
+            "All images have org_id",
+            "All images have user_id",
+            "Images properly isolated by org"
+          ],
+          "status": "pending"
+        }
+      ],
+      "completion_criteria": "All 6 test scenarios PASS",
+      "dependencies": ["phase_7"]
+    }
+  ],
+  "success_criteria": {
+    "must_have": [
+      "OAuth client registered and service token works",
+      "User tokens validated correctly",
+      "Image model has org_id and user_id",
+      "Multi-tenant isolation verified in MongoDB",
+      "Bob cannot access Alice's private images (403)",
+      "Org-shared images accessible within same org",
+      "Service token cleanup works",
+      "Docker rebuilt with --no-cache",
+      "No errors in container logs"
+    ],
+    "verification_commands": [
+      "curl http://localhost:8002/health",
+      "docker logs image-api | grep ERROR",
+      "docker exec image-api-mongodb mongosh image_db --eval 'db.images.find().limit(1)'",
+      "./test_oauth_migration.sh"
+    ]
+  },
+  "rollback_plan": {
+    "steps": [
+      "git checkout HEAD~1 (revert to previous version)",
+      "docker compose build --no-cache image-api",
+      "docker compose up -d image-api",
+      "Verify old version running: docker logs image-api"
+    ],
+    "data_preservation": "MongoDB images collection unchanged, safe to rollback code"
+  },
+  "common_issues": [
+    {
+      "issue": "Invalid token error",
+      "cause": "JWT_SECRET mismatch between image-api and auth-api",
+      "fix": "Copy JWT_SECRET from auth-api/.env to image-api/.env exactly"
+    },
+    {
+      "issue": "Changes not applied after code edit",
+      "cause": "Docker using cached image",
+      "fix": "ALWAYS rebuild with --no-cache flag"
+    },
+    {
+      "issue": "Access denied for valid user",
+      "cause": "User not in image's org_id",
+      "fix": "Verify user is member of organization in auth-api"
+    },
+    {
+      "issue": "Service token 403",
+      "cause": "Using get_current_user instead of get_service_principal",
+      "fix": "Update endpoint dependency to get_service_principal"
+    }
+  ],
+  "estimated_duration": {
+    "phase_1": "15 minutes",
+    "phase_2": "5 minutes",
+    "phase_3": "20 minutes",
+    "phase_4": "15 minutes",
+    "phase_5": "30 minutes",
+    "phase_6": "10 minutes",
+    "phase_7": "10 minutes",
+    "phase_8": "30 minutes",
+    "total": "2 hours 15 minutes"
+  },
+  "notes_for_ai_agent": [
+    "Execute phases sequentially - do not skip",
+    "Verify completion_criteria before moving to next phase",
+    "Run verification commands after each task",
+    "If task fails, check on_failure instructions",
+    "ALWAYS rebuild Docker with --no-cache",
+    "Test with fresh tokens (expire in 15 minutes)",
+    "Check MongoDB after each operation to verify data",
+    "Use exact test user credentials from TESTING_CREDENTIALS.md",
+    "Log all errors and responses for debugging"
+  ]
+}

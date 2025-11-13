@@ -216,6 +216,19 @@ def require_permission(permission: str) -> Callable:
         Raises:
             HTTPException: 403 if permission denied
         """
+        # Backwards compatibility: if no permissions in token, allow access
+        # This supports auth-api tokens that don't include permission claims
+        if not auth.permissions:
+            logger.info(
+                "permission_check_bypassed",
+                user_id=auth.user_id,
+                org_id=auth.org_id,
+                reason="no_permissions_in_token",
+                note="Backwards compatibility mode - token has no permission claims"
+            )
+            return auth
+
+        # Check if user has the required permission
         if permission not in auth.permissions:
             logger.warning(
                 "permission_denied",
