@@ -80,9 +80,15 @@ class BucketValidator:
     """
 
     # Regex patterns for bucket validation
+    # With org prefix (multi-tenant apps)
     GROUP_PATTERN = re.compile(r'^org-([a-zA-Z0-9\-_]+)/groups/([a-zA-Z0-9\-_]+)/?$')
     USER_PATTERN = re.compile(r'^org-([a-zA-Z0-9\-_]+)/users/([a-zA-Z0-9\-_]+)/?$')
     SYSTEM_PATTERN = re.compile(r'^org-([a-zA-Z0-9\-_]+)/system/?$')
+
+    # Without org prefix (single-tenant apps or apps without org concept)
+    GROUP_PATTERN_SIMPLE = re.compile(r'^groups/([a-zA-Z0-9\-_]+)/?$')
+    USER_PATTERN_SIMPLE = re.compile(r'^users/([a-zA-Z0-9\-_]+)/?$')
+    SYSTEM_PATTERN_SIMPLE = re.compile(r'^system/?$')
 
     def parse(self, bucket: str) -> BucketInfo:
         """Parse and validate bucket string.
@@ -102,7 +108,7 @@ class BucketValidator:
                 detail="Bucket must be a non-empty string"
             )
 
-        # Try group pattern
+        # Try group pattern (with org prefix)
         match = self.GROUP_PATTERN.match(bucket)
         if match:
             return BucketInfo(
@@ -112,7 +118,7 @@ class BucketValidator:
                 original_bucket=bucket
             )
 
-        # Try user pattern
+        # Try user pattern (with org prefix)
         match = self.USER_PATTERN.match(bucket)
         if match:
             return BucketInfo(
@@ -122,12 +128,42 @@ class BucketValidator:
                 original_bucket=bucket
             )
 
-        # Try system pattern
+        # Try system pattern (with org prefix)
         match = self.SYSTEM_PATTERN.match(bucket)
         if match:
             return BucketInfo(
                 bucket_type="system",
                 org_id=match.group(1),
+                resource_id=None,
+                original_bucket=bucket
+            )
+
+        # Try simple group pattern (without org prefix)
+        match = self.GROUP_PATTERN_SIMPLE.match(bucket)
+        if match:
+            return BucketInfo(
+                bucket_type="group",
+                org_id=None,  # No org concept
+                resource_id=match.group(1),
+                original_bucket=bucket
+            )
+
+        # Try simple user pattern (without org prefix)
+        match = self.USER_PATTERN_SIMPLE.match(bucket)
+        if match:
+            return BucketInfo(
+                bucket_type="user",
+                org_id=None,  # No org concept
+                resource_id=match.group(1),
+                original_bucket=bucket
+            )
+
+        # Try simple system pattern (without org prefix)
+        match = self.SYSTEM_PATTERN_SIMPLE.match(bucket)
+        if match:
+            return BucketInfo(
+                bucket_type="system",
+                org_id=None,  # No org concept
                 resource_id=None,
                 original_bucket=bucket
             )
@@ -140,7 +176,10 @@ class BucketValidator:
                 expected_formats=[
                     "org-{org_id}/groups/{group_id}/",
                     "org-{org_id}/users/{user_id}/",
-                    "org-{org_id}/system/"
+                    "org-{org_id}/system/",
+                    "groups/{group_id}/",
+                    "users/{user_id}/",
+                    "system/"
                 ]
             )
             raise HTTPException(
@@ -148,8 +187,11 @@ class BucketValidator:
                 detail=(
                     "Invalid bucket format. Expected: "
                     "org-{org_id}/groups/{group_id}/, "
-                    "org-{org_id}/users/{user_id}/, or "
-                    "org-{org_id}/system/"
+                    "org-{org_id}/users/{user_id}/, "
+                    "org-{org_id}/system/, "
+                    "groups/{group_id}/, "
+                    "users/{user_id}/, or "
+                    "system/"
                 )
             )
 
@@ -593,19 +635,20 @@ class AuthorizationService:
         # Parse and validate bucket
         bucket_info = self.validator.parse(bucket)
 
-        # Validate org_id match
-        if bucket_info.org_id != auth_context.org_id:
-            logger.warning(
-                "org_mismatch",
-                token_org_id=auth_context.org_id,
-                bucket_org_id=bucket_info.org_id,
-                user_id=auth_context.user_id,
-                bucket=bucket
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Organization ID mismatch"
-            )
+        # Validate org_id match (only if both have org_id)
+        if bucket_info.org_id is not None and auth_context.org_id is not None:
+            if bucket_info.org_id != auth_context.org_id:
+                logger.warning(
+                    "org_mismatch",
+                    token_org_id=auth_context.org_id,
+                    bucket_org_id=bucket_info.org_id,
+                    user_id=auth_context.user_id,
+                    bucket=bucket
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Organization ID mismatch"
+                )
 
         # Determine required permission based on bucket type
         required_permission = self._build_permission(

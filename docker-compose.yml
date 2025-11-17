@@ -58,6 +58,9 @@ services:
 
       # Processing
       WEBP_QUALITY: 85
+
+      # Logging
+      LOG_LEVEL: DEBUG
     depends_on:
       redis:
         condition: service_healthy

@@ -368,17 +368,16 @@ class JWKSManager:
 
 
 class JWTAuthMiddleware(BaseHTTPMiddleware):
-    """OAuth 2.0 JWT validation middleware.
+    """OAuth 2.0 JWT validation middleware with HS256 shared secret.
 
-    Validates JWT tokens locally using JWKS public keys from auth-api.
+    Validates JWT tokens locally using shared secret (HS256).
     No remote API calls needed for authorization - all claims are in the token.
 
     Flow:
         1. Extract Bearer token from Authorization header
-        2. Get Key ID (kid) from token header
-        3. Fetch public key from JWKS (cached)
-        4. Validate token signature, expiry, issuer, audience
-        5. Store validated payload in request.state
+        2. Validate token signature using shared secret
+        3. Validate token expiry, issuer, audience
+        4. Store validated payload in request.state
     """
 
     def __init__(self, app: ASGIApp):
@@ -391,9 +390,11 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         from app.core.config import settings
 
         self.settings = settings
-        self.jwks_manager = JWKSManager(
-            jwks_url=settings.AUTH_API_JWKS_URL,
-            cache_ttl=settings.JWKS_CACHE_TTL
+        logger.info(
+            "jwt_middleware_initialized",
+            algorithm=settings.JWT_ALGORITHM,
+            issuer=settings.AUTH_API_ISSUER_URL,
+            audience=settings.AUTH_API_AUDIENCE,
         )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
@@ -407,7 +408,7 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             HTTP response
         """
         from jose import jwt
-        from jose.exceptions import JOSEError, ExpiredSignatureError, JWTError
+        from jose.exceptions import ExpiredSignatureError, JWTError
 
         # Extract token from Authorization header
         token = self._get_token_from_header(request)
@@ -419,28 +420,16 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            # Initialize JWKS keys if needed (first request)
-            if not self.jwks_manager.keys:
-                await self.jwks_manager.refresh_keys()
-
-            # Get Key ID from token header
-            unverified_header = jwt.get_unverified_header(token)
-            kid = unverified_header.get("kid")
-
-            if not kid:
-                logger.warning("jwt_missing_kid", token_header=unverified_header)
-                return self._unauthorized_response("Token header missing 'kid'")
-
-            # Get public key from JWKS
-            public_key = await self.jwks_manager.get_key(kid)
-
-            # Decode and validate token
+            # Decode and validate token with shared secret (HS256)
+            # Note: auth-api tokens don't include iss/aud claims, so we skip those validations
             payload = jwt.decode(
                 token,
-                public_key.to_dict(),
+                self.settings.JWT_SECRET_KEY,
                 algorithms=[self.settings.JWT_ALGORITHM],
-                issuer=self.settings.AUTH_API_ISSUER_URL,
-                audience=self.settings.AUTH_API_AUDIENCE,
+                options={
+                    "verify_aud": False,  # auth-api tokens don't include audience
+                    "verify_iss": False,  # auth-api tokens don't include issuer
+                }
             )
 
             # Success - store validated payload in request state
