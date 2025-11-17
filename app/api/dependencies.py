@@ -1,6 +1,6 @@
 """FastAPI dependencies for authentication, validation, and rate limiting."""
 
-from fastapi import Depends, HTTPException, status, Header, Request
+from fastapi import Depends, HTTPException, status, Header, Request, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import magic
 from typing import Optional, Callable
@@ -9,6 +9,11 @@ from pydantic import BaseModel, ValidationError
 from app.core.config import settings
 from app.core.logging_config import get_logger
 from app.db.sqlite import get_db
+from app.core.authorization import (
+    get_authorization_service,
+    AuthorizationService,
+    AuthContext as AuthContextDataclass
+)
 
 
 security = HTTPBearer()
@@ -233,3 +238,163 @@ def require_permission(permission: str) -> Callable:
         return auth
 
     return _check_permission
+
+
+# ============================================================================
+# Distributed Authorization Dependencies
+# ============================================================================
+
+
+def require_bucket_access(permission: str) -> Callable:
+    """Dependency factory for bucket-based authorization with distributed auth checks.
+
+    This dependency:
+    1. Validates bucket format (org-{org_id}/groups/{group_id}/, etc.)
+    2. Checks org_id match between JWT and bucket
+    3. For group buckets: Calls auth-api to verify group membership
+    4. For user buckets: Checks if user owns the bucket
+    5. For system buckets: Allows all authenticated users
+
+    Usage in endpoint:
+        @router.post("/upload")
+        async def upload_image(
+            file: UploadFile,
+            bucket: str = Form(...),
+            auth: AuthContext = Depends(require_bucket_access("image:upload"))
+        ):
+            # User is authorized for this specific bucket
+            logger.info("upload", user_id=auth.user_id, bucket=bucket)
+            ...
+
+    Args:
+        permission: Base permission (e.g., "image:upload", "image:read")
+
+    Returns:
+        Callable: FastAPI dependency function
+    """
+    async def _check_bucket_access(
+        auth: AuthContext = Depends(get_auth_context),
+        bucket: str = Form(...),
+        auth_service: AuthorizationService = Depends(get_authorization_service)
+    ) -> AuthContext:
+        """Check if user has access to perform operation on bucket.
+
+        Args:
+            auth: Authenticated user context from JWT
+            bucket: Bucket identifier from form data
+            auth_service: Authorization service
+
+        Returns:
+            AuthContext: User context (if authorized)
+
+        Raises:
+            HTTPException: 400 for invalid bucket, 403 for denied access, 503 for auth-api issues
+        """
+        # Convert Pydantic AuthContext to dataclass for authorization service
+        auth_context_dc = AuthContextDataclass(
+            user_id=auth.user_id,
+            org_id=auth.org_id,
+            permissions=auth.permissions
+        )
+
+        # Check access (raises HTTPException if denied)
+        await auth_service.check_access(
+            auth_context=auth_context_dc,
+            permission=permission,
+            bucket=bucket
+        )
+
+        logger.info(
+            "bucket_access_granted",
+            user_id=auth.user_id,
+            org_id=auth.org_id,
+            bucket=bucket,
+            permission=permission
+        )
+
+        # Return original auth context
+        return auth
+
+    return _check_bucket_access
+
+
+async def require_bucket_read_access(
+    request: Request,
+    bucket: str
+) -> Optional[AuthContext]:
+    """Check read access to bucket for retrieval endpoints.
+
+    This function handles both authenticated and unauthenticated access:
+    - System buckets: Public access (no auth required)
+    - User buckets: Owner only
+    - Group buckets: Group members only (requires auth-api check)
+
+    Note: This is NOT a FastAPI dependency (no Depends in signature).
+    Call directly: `auth = await require_bucket_read_access(request, bucket)`
+
+    Args:
+        request: HTTP request
+        bucket: Bucket identifier
+
+    Returns:
+        Optional[AuthContext]: User context if authenticated, None if public access
+
+    Raises:
+        HTTPException: 403 if access denied
+    """
+    # Try to get auth context (may not exist for public endpoints)
+    auth = None
+    if hasattr(request.state, "authenticated") and request.state.authenticated:
+        if hasattr(request.state, "auth_payload"):
+            payload = request.state.auth_payload
+            try:
+                auth = AuthContext(
+                    user_id=payload["sub"],
+                    org_id=payload.get("org_id", "default-org"),
+                    permissions=payload.get("permissions", []),
+                    email=payload.get("email"),
+                    name=payload.get("name")
+                )
+            except (KeyError, ValidationError):
+                # Invalid auth payload, treat as unauthenticated
+                pass
+
+    # Parse bucket to determine access requirements
+    from app.core.authorization import BucketValidator
+    validator = BucketValidator()
+
+    try:
+        bucket_info = validator.parse(bucket)
+    except HTTPException:
+        # Invalid bucket format
+        raise
+
+    # System buckets are public
+    if bucket_info.bucket_type == "system":
+        return auth
+
+    # User and group buckets require authentication
+    if auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required for this bucket"
+        )
+
+    # Convert to dataclass for authorization service
+    auth_context_dc = AuthContextDataclass(
+        user_id=auth.user_id,
+        org_id=auth.org_id,
+        permissions=auth.permissions
+    )
+
+    # Get authorization service (uses singleton Redis pool)
+    auth_service = await get_authorization_service()
+
+    # Check access
+    await auth_service.check_access(
+        auth_context=auth_context_dc,
+        permission="image:read",
+        bucket=bucket
+    )
+
+    return auth
