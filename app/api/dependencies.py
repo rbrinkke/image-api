@@ -320,20 +320,21 @@ def require_bucket_access(permission: str) -> Callable:
 
 async def require_bucket_read_access(
     request: Request,
-    bucket: str,
-    auth_service: AuthorizationService = Depends(get_authorization_service)
+    bucket: str
 ) -> Optional[AuthContext]:
     """Check read access to bucket for retrieval endpoints.
 
-    This dependency handles both authenticated and unauthenticated access:
+    This function handles both authenticated and unauthenticated access:
     - System buckets: Public access (no auth required)
     - User buckets: Owner only
     - Group buckets: Group members only (requires auth-api check)
 
+    Note: This is NOT a FastAPI dependency (no Depends in signature).
+    Call directly: `auth = await require_bucket_read_access(request, bucket)`
+
     Args:
         request: HTTP request
         bucket: Bucket identifier
-        auth_service: Authorization service
 
     Returns:
         Optional[AuthContext]: User context if authenticated, None if public access
@@ -385,6 +386,9 @@ async def require_bucket_read_access(
         org_id=auth.org_id,
         permissions=auth.permissions
     )
+
+    # Get authorization service (uses singleton Redis pool)
+    auth_service = await get_authorization_service()
 
     # Check access
     await auth_service.check_access(

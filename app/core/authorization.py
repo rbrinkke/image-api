@@ -392,7 +392,7 @@ class CircuitBreaker:
             Result of function call
 
         Raises:
-            HTTPException: 503 if circuit is open
+            HTTPException: 503 if circuit is open or service fails
         """
         # Check if circuit is open
         if await self.is_open():
@@ -412,10 +412,23 @@ class CircuitBreaker:
             await self.record_success()
             return result
         except HTTPException as e:
-            # Record failure for 5xx errors
+            # Record failure for 5xx errors (service errors)
             if e.status_code >= 500:
                 await self.record_failure()
             raise
+        except Exception as e:
+            # Unexpected error - record failure and convert to 503
+            logger.error(
+                "circuit_breaker_unexpected_error",
+                error_type=type(e).__name__,
+                error=str(e),
+                exc_info=True
+            )
+            await self.record_failure()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization service error"
+            )
 
 
 # ============================================================================
@@ -727,28 +740,53 @@ class AuthorizationService:
 
 
 # ============================================================================
-# Dependency Injection Helpers
+# Dependency Injection Helpers & Singleton Pattern
 # ============================================================================
 
 
-async def get_redis_client() -> redis.Redis:
-    """Get Redis client for authorization system.
+# Global Redis client pool (singleton)
+_redis_pool: Optional[redis.Redis] = None
+
+
+async def get_redis_pool() -> redis.Redis:
+    """Get or create singleton Redis connection pool.
+
+    This function ensures only one Redis connection pool exists for the entire
+    application lifecycle, preventing memory leaks and connection exhaustion.
 
     Returns:
-        redis.Redis: Async Redis client
+        redis.Redis: Shared async Redis client with connection pooling
     """
-    return redis.from_url(
-        settings.REDIS_URL,
-        encoding="utf-8",
-        decode_responses=False
-    )
+    global _redis_pool
+
+    if _redis_pool is None:
+        logger.info(
+            "initializing_redis_pool",
+            redis_url=settings.REDIS_URL,
+            max_connections=10
+        )
+        _redis_pool = redis.from_url(
+            settings.REDIS_URL,
+            encoding="utf-8",
+            decode_responses=False,
+            max_connections=10,  # Connection pool size
+            socket_keepalive=True,
+            socket_connect_timeout=5,
+            retry_on_timeout=True
+        )
+
+    return _redis_pool
 
 
 async def get_authorization_service() -> AuthorizationService:
-    """Get authorization service instance.
+    """Get authorization service instance with shared Redis pool.
 
     Returns:
         AuthorizationService: Configured authorization service
+
+    Note:
+        The Redis client is shared across all requests via connection pooling.
+        This prevents memory leaks and connection exhaustion.
     """
-    redis_client = await get_redis_client()
-    return AuthorizationService(redis_client)
+    redis_pool = await get_redis_pool()
+    return AuthorizationService(redis_pool)
