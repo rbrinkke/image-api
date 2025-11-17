@@ -10,9 +10,10 @@ import json
 from app.api.dependencies import (
     verify_content_length,
     validate_image_file,
-    require_permission
+    require_permission,
+    require_bucket_access,
+    AuthContext
 )
-from app.core.authorization import AuthContext
 from app.storage import get_storage
 from app.db.sqlite import get_db
 from app.tasks.celery_app import process_image_task
@@ -30,7 +31,7 @@ async def upload_image(
     bucket: str = Form(...),
     metadata: Optional[str] = Form("{}"),
     content_length: int = Depends(verify_content_length),
-    auth: AuthContext = Depends(require_permission("image:upload")),
+    auth: AuthContext = Depends(require_bucket_access("image:upload")),
     storage=Depends(get_storage),
     db=Depends(get_db)
 ):
@@ -39,14 +40,17 @@ async def upload_image(
     Returns job_id for status polling and image_id as permanent identifier.
     Processing happens in background via Celery workers.
 
-    **Authorization**: Requires `image:upload` permission via auth-api.
+    **Authorization**: Requires bucket-specific access via distributed authorization system.
+    - Group buckets (org-{org_id}/groups/{group_id}/): Requires group membership
+    - User buckets (org-{org_id}/users/{user_id}/): Owner only
+    - System buckets (org-{org_id}/system/): All authenticated users
 
     Args:
         file: Image file upload (JPEG, PNG, WebP)
-        bucket: Target storage bucket name
+        bucket: Target storage bucket (must match format: org-{org_id}/groups/{group_id}/)
         metadata: Optional JSON metadata (pass-through)
         content_length: Pre-validated content length
-        auth: Authenticated user context (with permission check)
+        auth: Authenticated user context (with bucket access check)
         storage: Storage backend instance
         db: Database instance
 
@@ -54,10 +58,11 @@ async def upload_image(
         JSONResponse: 202 Accepted with job_id, image_id, status_url
 
     Raises:
-        HTTPException: 415 if file type unsupported
+        HTTPException: 400 if invalid bucket format
         HTTPException: 413 if file too large
+        HTTPException: 415 if file type unsupported
         HTTPException: 429 if rate limit exceeded
-        HTTPException: 403 if permission denied
+        HTTPException: 403 if permission denied or org mismatch
         HTTPException: 503 if authorization service unavailable
     """
     # Check rate limit (after permission check)

@@ -1,15 +1,14 @@
 """Retrieval API endpoints for accessing processed images."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
-from typing import Literal
+from typing import Literal, Optional
 from enum import Enum
 
 from app.db.sqlite import get_db
 from app.storage import get_storage
 from app.core.logging_config import get_logger
-from app.api.dependencies import require_permission
-from app.core.authorization import AuthContext
+from app.api.dependencies import require_permission, require_bucket_read_access, AuthContext
 
 
 logger = get_logger(__name__)
@@ -26,6 +25,7 @@ class ImageSize(str, Enum):
 
 @router.get("/{image_id}")
 async def get_image_info(
+    request: Request,
     image_id: str,
     size: ImageSize = Query(ImageSize.medium),
     db=Depends(get_db),
@@ -33,7 +33,13 @@ async def get_image_info(
 ):
     """Get image URL and metadata by image_id.
 
+    **Authorization**:
+    - System buckets: Public access (no auth required)
+    - User buckets: Owner only
+    - Group buckets: Group members only
+
     Args:
+        request: HTTP request for auth context
         image_id: Image identifier
         size: Desired size variant
         db: Database instance
@@ -44,6 +50,8 @@ async def get_image_info(
 
     Raises:
         HTTPException: 404 if image not found or size not available
+        HTTPException: 401 if auth required but not provided
+        HTTPException: 403 if access denied
     """
     logger.debug(
         "image_info_request",
@@ -57,6 +65,17 @@ async def get_image_info(
         logger.warning("image_not_found", image_id=image_id)
         raise HTTPException(status_code=404, detail="Image not found")
 
+    # Check bucket access authorization
+    bucket = job["storage_bucket"]
+    auth = await require_bucket_read_access(request, bucket)
+
+    logger.debug(
+        "bucket_read_access_granted",
+        image_id=image_id,
+        bucket=bucket,
+        authenticated=auth is not None,
+    )
+
     paths = job["processed_paths"]
     if size.value not in paths:
         logger.warning(
@@ -67,7 +86,6 @@ async def get_image_info(
         )
         raise HTTPException(status_code=404, detail=f"Size '{size.value}' not available")
 
-    bucket = job["storage_bucket"]
     path = paths[size.value]
     url = await storage.get_url(bucket, path)
 
@@ -93,13 +111,20 @@ async def get_image_info(
 
 @router.get("/{image_id}/all")
 async def get_all_image_sizes(
+    request: Request,
     image_id: str,
     db=Depends(get_db),
     storage=Depends(get_storage)
 ):
     """Get all size variants for an image.
 
+    **Authorization**:
+    - System buckets: Public access (no auth required)
+    - User buckets: Owner only
+    - Group buckets: Group members only
+
     Args:
+        request: HTTP request for auth context
         image_id: Image identifier
         db: Database instance
         storage: Storage backend
@@ -109,6 +134,8 @@ async def get_all_image_sizes(
 
     Raises:
         HTTPException: 404 if image not found
+        HTTPException: 401 if auth required but not provided
+        HTTPException: 403 if access denied
     """
     logger.debug("all_sizes_request", image_id=image_id)
 
@@ -118,7 +145,17 @@ async def get_all_image_sizes(
         logger.warning("all_sizes_not_found", image_id=image_id)
         raise HTTPException(status_code=404, detail="Image not found")
 
+    # Check bucket access authorization
     bucket = job["storage_bucket"]
+    auth = await require_bucket_read_access(request, bucket)
+
+    logger.debug(
+        "bucket_read_access_granted_all",
+        image_id=image_id,
+        bucket=bucket,
+        authenticated=auth is not None,
+    )
+
     paths = job["processed_paths"]
 
     # Generate URLs for all variants asynchronously
@@ -142,6 +179,7 @@ async def get_all_image_sizes(
 
 @router.get("/{image_id}/direct")
 async def serve_image_direct(
+    request: Request,
     image_id: str,
     size: ImageSize = Query(ImageSize.medium),
     db=Depends(get_db),
@@ -152,7 +190,13 @@ async def serve_image_direct(
     For local storage: serves file directly with caching headers.
     For S3 storage: redirects to presigned URL.
 
+    **Authorization**:
+    - System buckets: Public access (no auth required)
+    - User buckets: Owner only
+    - Group buckets: Group members only
+
     Args:
+        request: HTTP request for auth context
         image_id: Image identifier
         size: Desired size variant
         db: Database instance
@@ -163,6 +207,8 @@ async def serve_image_direct(
 
     Raises:
         HTTPException: 404 if image or size not found
+        HTTPException: 401 if auth required but not provided
+        HTTPException: 403 if access denied
     """
     logger.debug(
         "direct_image_request",
@@ -180,6 +226,17 @@ async def serve_image_direct(
         )
         raise HTTPException(status_code=404, detail="Image not found")
 
+    # Check bucket access authorization
+    bucket = job["storage_bucket"]
+    auth = await require_bucket_read_access(request, bucket)
+
+    logger.debug(
+        "bucket_read_access_granted_direct",
+        image_id=image_id,
+        bucket=bucket,
+        authenticated=auth is not None,
+    )
+
     paths = job["processed_paths"]
     if size.value not in paths:
         logger.warning(
@@ -190,7 +247,6 @@ async def serve_image_direct(
         )
         raise HTTPException(status_code=404, detail=f"Size '{size.value}' not available")
 
-    bucket = job["storage_bucket"]
     path = paths[size.value]
 
     # Local storage: serve file directly
@@ -224,8 +280,8 @@ async def serve_image_direct(
 
 @router.delete("/{image_id}")
 async def delete_image(
+    request: Request,
     image_id: str,
-    auth: AuthContext = Depends(require_permission("image:delete")),
     db=Depends(get_db),
     storage=Depends(get_storage)
 ):
@@ -234,11 +290,14 @@ async def delete_image(
     Removes all processed files from storage.
     Database records are retained for audit trail.
 
-    **Authorization**: Requires `image:delete` permission via auth-api.
+    **Authorization**: Requires bucket-specific delete access.
+    - Group buckets: Requires group membership
+    - User buckets: Owner only
+    - System buckets: All authenticated users
 
     Args:
+        request: HTTP request for auth context
         image_id: Image identifier
-        auth: Authenticated user context (with permission check)
         db: Database instance
         storage: Storage backend
 
@@ -247,23 +306,36 @@ async def delete_image(
 
     Raises:
         HTTPException: 404 if image not found
+        HTTPException: 401 if not authenticated
         HTTPException: 403 if permission denied
         HTTPException: 503 if authorization service unavailable
     """
-    logger.info(
-        "image_deletion_request",
-        image_id=image_id,
-        user_id=auth.user_id,
-        org_id=auth.org_id,
-    )
-
+    # Get job first to determine bucket
     job = await db.get_job_by_image_id(image_id)
 
     if not job:
         logger.warning("image_deletion_not_found", image_id=image_id)
         raise HTTPException(status_code=404, detail="Image not found")
 
+    # Check bucket access authorization for delete operation
     bucket = job["storage_bucket"]
+    auth = await require_bucket_read_access(request, bucket)
+
+    # Delete requires authentication (no public deletes)
+    if auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required for deletion"
+        )
+
+    logger.info(
+        "image_deletion_request",
+        image_id=image_id,
+        user_id=auth.user_id,
+        org_id=auth.org_id,
+        bucket=bucket,
+    )
+
     deleted_count = 0
     failed_deletions = []
 
@@ -330,6 +402,7 @@ async def delete_image(
 
 @router.get("/batch")
 async def get_images_batch(
+    request: Request,
     image_ids: str = Query(..., description="Comma-separated image UUIDs"),
     size: ImageSize = Query(ImageSize.medium),
     db=Depends(get_db),
@@ -339,7 +412,13 @@ async def get_images_batch(
 
     Maximum 50 images per request for performance.
 
+    **Authorization**: Each image checked individually based on bucket access.
+    - System buckets: Public access
+    - User buckets: Owner only
+    - Group buckets: Group members only
+
     Args:
+        request: HTTP request for auth context
         image_ids: Comma-separated list of image IDs
         size: Desired size variant for all images
         db: Database instance
@@ -347,6 +426,7 @@ async def get_images_batch(
 
     Returns:
         dict: List of image results with requested/found counts
+        Note: Images with denied access are silently omitted from results
 
     Raises:
         HTTPException: 400 if more than 50 images requested
@@ -378,6 +458,21 @@ async def get_images_batch(
             job = await db.get_job_by_image_id(image_id)
             if job and job["processed_paths"].get(size.value):
                 bucket = job["storage_bucket"]
+
+                # Check bucket access for this image
+                try:
+                    auth = await require_bucket_read_access(request, bucket)
+                except HTTPException as auth_exc:
+                    # Access denied - silently skip this image
+                    logger.debug(
+                        "batch_item_access_denied",
+                        image_id=image_id,
+                        bucket=bucket,
+                        error=auth_exc.detail
+                    )
+                    failed_ids.append(image_id)
+                    continue
+
                 path = job["processed_paths"][size.value]
                 url = await storage.get_url(bucket, path)
 

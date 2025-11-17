@@ -48,6 +48,25 @@ class Settings(BaseSettings):
     # Backward compatibility - old symmetric key (deprecated, used for testing only)
     JWT_SECRET_KEY: str = "change-this-in-production"  # DEPRECATED: Only for testing
 
+    # Auth-API Integration for distributed authorization
+    AUTH_API_URL: str = "http://auth-api:8000"
+    AUTH_API_TIMEOUT: int = 5
+    AUTH_API_CHECK_ENDPOINT: str = "/api/v1/authorization/check"
+
+    # Authorization Cache
+    AUTH_CACHE_ENABLED: bool = True
+    AUTH_CACHE_TTL_ALLOWED: int = 60  # Cache allowed permissions for 60s
+    AUTH_CACHE_TTL_DENIED: int = 120  # Cache denied permissions for 120s
+
+    # Circuit Breaker
+    CIRCUIT_BREAKER_ENABLED: bool = True
+    CIRCUIT_BREAKER_THRESHOLD: int = 5  # Open after 5 consecutive failures
+    CIRCUIT_BREAKER_TIMEOUT: int = 60  # Stay open for 60s
+    AUTH_FAIL_OPEN: bool = False  # Fail-closed: deny access when auth-api is down
+
+    # Bucket Validation
+    BUCKET_VALIDATION_STRICT: bool = True  # Enforce strict bucket format validation
+
     # Rate Limiting
     RATE_LIMIT_MAX_UPLOADS: int = 50
     RATE_LIMIT_WINDOW_MINUTES: int = 60
