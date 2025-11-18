@@ -158,47 +158,70 @@ async def get_failed_jobs(limit: int = 50, db=Depends(get_db)):
 
 @router.get("/auth")
 async def authorization_health_check():
-    """OAuth 2.0 Resource Server health check.
+    """Distributed Authorization System health check.
 
-    Checks connectivity to the auth-api's JWKS endpoint
-    for JWT token validation.
+    Checks JWT validation, auth-api connectivity, circuit breaker status,
+    and authorization cache health.
 
     Returns:
-        dict: OAuth 2.0 configuration and JWKS endpoint health
+        dict: Authorization system status and configuration
     """
     import httpx
+    from app.core.authorization import get_authorization_service
 
-    # Check JWKS endpoint connectivity
-    jwks_healthy = False
-    jwks_error = None
-    key_count = 0
+    # Get authorization service instance
+    auth_service = await get_authorization_service()
 
+    # Check circuit breaker status
+    cb_state = "unknown"
+    cb_failure_count = 0
+    try:
+        cb_state = await auth_service.circuit_breaker.get_state()
+        cb_failure_count = await auth_service.circuit_breaker.get_failure_count()
+    except Exception as e:
+        logger.warning("circuit_breaker_health_check_failed", error=str(e))
+
+    # Check auth-api connectivity
+    auth_api_healthy = False
+    auth_api_error = None
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(settings.AUTH_API_JWKS_URL)
-            response.raise_for_status()
-            jwks_data = response.json()
-            key_count = len(jwks_data.get("keys", []))
-            jwks_healthy = True
+            response = await client.get(f"{settings.AUTH_API_URL}/health")
+            auth_api_healthy = response.status_code == 200
     except Exception as e:
-        jwks_error = str(e)
-        logger.warning("jwks_health_check_failed", error=jwks_error)
+        auth_api_error = str(e)
+        logger.warning("auth_api_health_check_failed", error=auth_api_error)
+
+    # Overall health status
+    overall_healthy = auth_api_healthy and cb_state == "closed"
 
     # Build response
     return {
-        "status": "healthy" if jwks_healthy else "degraded",
-        "oauth2": {
-            "mode": "Resource Server",
-            "issuer_url": settings.AUTH_API_ISSUER_URL,
-            "jwks_url": settings.AUTH_API_JWKS_URL,
+        "status": "healthy" if overall_healthy else "degraded",
+        "jwt_validation": {
+            "mode": "HS256 Shared Secret",
+            "issuer": settings.AUTH_API_ISSUER_URL,
             "audience": settings.AUTH_API_AUDIENCE,
             "algorithm": settings.JWT_ALGORITHM,
-            "jwks_cache_ttl_seconds": settings.JWKS_CACHE_TTL,
         },
-        "jwks_endpoint": {
-            "status": "healthy" if jwks_healthy else "down",
-            "error": jwks_error,
-            "public_keys_available": key_count
+        "authorization": {
+            "enabled": True,
+            "cache_enabled": settings.AUTH_CACHE_ENABLED,
+            "cache_ttl_allowed_seconds": settings.AUTH_CACHE_TTL_ALLOWED,
+            "cache_ttl_denied_seconds": settings.AUTH_CACHE_TTL_DENIED,
+            "fail_mode": "closed" if not settings.AUTH_FAIL_OPEN else "open",
+        },
+        "circuit_breaker": {
+            "enabled": settings.CIRCUIT_BREAKER_ENABLED,
+            "state": cb_state,
+            "failure_count": cb_failure_count,
+            "threshold": settings.CIRCUIT_BREAKER_THRESHOLD,
+            "timeout_seconds": settings.CIRCUIT_BREAKER_TIMEOUT,
+        },
+        "auth_api": {
+            "url": settings.AUTH_API_URL,
+            "status": "healthy" if auth_api_healthy else "down",
+            "error": auth_api_error,
         },
         "timestamp": datetime.utcnow().isoformat()
     }

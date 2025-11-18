@@ -38,14 +38,13 @@ services:
 
       # Storage
       STORAGE_PATH: /data/storage
-      STORAGE_BACKEND: local  # Options: local, s3
-      # AWS_REGION: eu-west-1  # Uncomment for S3
+      STORAGE_BACKEND: local
 
       # Redis
       REDIS_URL: redis://redis:6379/0
 
       # Security
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-in-production}
+      JWT_SECRET_KEY: your_very_long_secret_key_at_least_32_characters
       JWT_ALGORITHM: HS256
 
       # Upload Constraints
@@ -58,6 +57,9 @@ services:
 
       # Processing
       WEBP_QUALITY: 85
+
+      # Logging
+      LOG_LEVEL: DEBUG
     depends_on:
       redis:
         condition: service_healthy
@@ -99,7 +101,6 @@ services:
       # Storage
       STORAGE_PATH: /data/storage
       STORAGE_BACKEND: local
-      # AWS_REGION: eu-west-1  # Uncomment for S3
 
       # Redis
       REDIS_URL: redis://redis:6379/0
