@@ -225,3 +225,4 @@ async def get_job_result(job_id: str, db=Depends(get_db)):
         "metadata": job["processing_metadata"],
         "completed_at": job["completed_at"]
     }
+

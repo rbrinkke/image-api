@@ -257,3 +257,4 @@ class ImageService:
             "updated_at": job["updated_at"],
             "last_error": job.get("last_error")
         }
+

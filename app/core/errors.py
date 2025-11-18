@@ -97,3 +97,4 @@ def auth_error(code: ErrorCode, message: str, details: Optional[Dict[str, Any]] 
 def not_found_error(code: ErrorCode, message: str, details: Optional[Dict[str, Any]] = None) -> ServiceError:
     """Create a not-found error (404 Not Found)."""
     return ServiceError(status.HTTP_404_NOT_FOUND, code, message, details)
+
