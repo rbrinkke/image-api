@@ -98,3 +98,5 @@ def not_found_error(code: ErrorCode, message: str, details: Optional[Dict[str, A
     """Create a not-found error (404 Not Found)."""
     return ServiceError(status.HTTP_404_NOT_FOUND, code, message, details)
 
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

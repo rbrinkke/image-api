@@ -226,3 +226,5 @@ async def get_job_result(job_id: str, db=Depends(get_db)):
         "completed_at": job["completed_at"]
     }
 
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

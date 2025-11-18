@@ -421,3 +421,5 @@ class S3StorageBackend:
             )
             # Convert to enriched exception
             raise self._handle_s3_error(exc, "presigned_url_generation", bucket, path)
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

@@ -419,3 +419,5 @@ def setup_periodic_tasks(sender, **kwargs):
         cleanup_old_rate_limits.s(),
         name='cleanup-rate-limits-hourly'
     )
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

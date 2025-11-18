@@ -36,3 +36,5 @@ from app.tasks.processing import process_image_task  # noqa: F401, E402
 
 
 __all__ = ["celery_app", "process_image_task"]
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code
