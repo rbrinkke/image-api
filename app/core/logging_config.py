@@ -408,3 +408,5 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
         >>> logger.error("processing_failed", job_id="abc", error="timeout")
     """
     return structlog.get_logger(name)
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

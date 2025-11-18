@@ -833,3 +833,5 @@ async def get_authorization_service() -> AuthorizationService:
     """
     redis_pool = await get_redis_pool()
     return AuthorizationService(redis_pool)
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

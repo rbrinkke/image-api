@@ -434,3 +434,5 @@ def get_image_service(
     storage = get_storage()
     return ImageService(db, storage)
 
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

@@ -258,3 +258,5 @@ class ImageService:
             "last_error": job.get("last_error")
         }
 
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

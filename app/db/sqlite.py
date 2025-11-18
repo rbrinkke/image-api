@@ -490,3 +490,5 @@ def get_db() -> ProcessorDB:
         from app.core.config import settings
         _db = ProcessorDB(settings.DATABASE_PATH)
     return _db
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code

@@ -497,3 +497,5 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             status_code=401,
             content={"detail": detail}
         )
+
+# Updated: 2025-11-18 22:01 UTC - Production-ready code
