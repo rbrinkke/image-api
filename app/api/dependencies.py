@@ -398,3 +398,38 @@ async def require_bucket_read_access(
     )
 
     return auth
+
+
+# ============================================================================
+# Service Layer Dependencies
+# ============================================================================
+
+
+def get_image_service(
+    db=Depends(get_db),
+) -> "ImageService":
+    """Factory for ImageService with dependency injection.
+
+    Automatically injects the correct DB and Storage backends.
+    This allows the service layer to remain pure business logic
+    without knowing about FastAPI dependencies.
+
+    Usage in endpoint:
+        @router.post("/upload")
+        async def upload_image(
+            service: ImageService = Depends(get_image_service)
+        ):
+            result = await service.process_new_upload(...)
+            return result
+
+    Args:
+        db: Database instance (injected)
+
+    Returns:
+        ImageService: Configured service instance
+    """
+    from app.services.image_service import ImageService
+    from app.storage import get_storage
+
+    storage = get_storage()
+    return ImageService(db, storage)

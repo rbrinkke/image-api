@@ -1,22 +1,26 @@
-"""Upload API endpoints for image processing."""
+"""
+Upload API endpoints for image processing.
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, status
+Clean Architecture Pattern:
+- Router handles HTTP concerns (headers, status codes, request/response format)
+- Service Layer handles business logic (orchestration, validation, persistence)
+- Dependencies inject required services and validate auth/rate limits
+"""
+
+from fastapi import APIRouter, UploadFile, File, Form, Depends, status
 from fastapi.responses import JSONResponse
-from uuid import uuid4
 from typing import Optional
-from datetime import datetime
-import json
 
 from app.api.dependencies import (
     verify_content_length,
     validate_image_file,
-    require_permission,
     require_bucket_access,
+    check_rate_limit,
+    get_image_service,
     AuthContext
 )
-from app.storage import get_storage
+from app.services.image_service import ImageService
 from app.db.sqlite import get_db
-from app.tasks.celery_app import process_image_task
 from app.core.config import settings
 from app.core.logging_config import get_logger
 
@@ -32,13 +36,16 @@ async def upload_image(
     metadata: Optional[str] = Form("{}"),
     content_length: int = Depends(verify_content_length),
     auth: AuthContext = Depends(require_bucket_access("image:upload")),
-    storage=Depends(get_storage),
-    db=Depends(get_db)
+    rate_limit: dict = Depends(check_rate_limit),
+    service: ImageService = Depends(get_image_service)
 ):
     """Upload image for asynchronous processing.
 
-    Returns job_id for status polling and image_id as permanent identifier.
-    Processing happens in background via Celery workers.
+    **Clean Architecture Pattern:**
+    1. Router validates HTTP-level concerns (file size, MIME type)
+    2. Dependencies enforce auth and rate limits
+    3. Service layer orchestrates business logic
+    4. Router constructs HTTP response
 
     **Authorization**: Requires bucket-specific access via distributed authorization system.
     - Group buckets (org-{org_id}/groups/{group_id}/): Requires group membership
@@ -49,10 +56,10 @@ async def upload_image(
         file: Image file upload (JPEG, PNG, WebP)
         bucket: Target storage bucket (must match format: org-{org_id}/groups/{group_id}/)
         metadata: Optional JSON metadata (pass-through)
-        content_length: Pre-validated content length
-        auth: Authenticated user context (with bucket access check)
-        storage: Storage backend instance
-        db: Database instance
+        content_length: Pre-validated content length (via dependency)
+        auth: Authenticated user context with bucket access (via dependency)
+        rate_limit: Rate limit check result (via dependency)
+        service: Image processing service (via dependency injection)
 
     Returns:
         JSONResponse: 202 Accepted with job_id, image_id, status_url
@@ -64,28 +71,8 @@ async def upload_image(
         HTTPException: 429 if rate limit exceeded
         HTTPException: 403 if permission denied or org mismatch
         HTTPException: 503 if authorization service unavailable
+        ServiceError: On business logic failures (converted to HTTP errors)
     """
-    # Check rate limit (after permission check)
-    rate_limit_result = await db.check_rate_limit(auth.user_id, settings.RATE_LIMIT_MAX_UPLOADS)
-
-    if not rate_limit_result["allowed"]:
-        logger.warning(
-            "upload_rate_limit_exceeded",
-            user_id=auth.user_id,
-            org_id=auth.org_id,
-            filename=file.filename,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Maximum {settings.RATE_LIMIT_MAX_UPLOADS} uploads per hour.",
-            headers={
-                "X-RateLimit-Limit": str(settings.RATE_LIMIT_MAX_UPLOADS),
-                "X-RateLimit-Remaining": "0",
-                "X-RateLimit-Reset": rate_limit_result["reset_at"],
-                "Retry-After": "3600"
-            }
-        )
-
     logger.info(
         "upload_request_received",
         filename=file.filename,
@@ -96,148 +83,50 @@ async def upload_image(
         org_id=auth.org_id,
     )
 
-    # Validate image type via magic bytes
-    try:
-        detected_mime = await validate_image_file(file)
-        logger.debug(
-            "image_validation_success",
-            filename=file.filename,
-            detected_mime=detected_mime,
-            declared_content_type=file.content_type,
-        )
-    except HTTPException as exc:
-        logger.warning(
-            "image_validation_failed",
-            filename=file.filename,
-            content_type=file.content_type,
-            error=exc.detail,
-            status_code=exc.status_code,
-        )
-        raise
-
-    # Parse metadata JSON
-    try:
-        meta = json.loads(metadata)
-    except json.JSONDecodeError as e:
-        logger.warning(
-            "metadata_json_parse_failed",
-            metadata=metadata,
-            error=str(e),
-        )
-        meta = {}
-
-    # Generate unique identifiers
-    job_id = str(uuid4())
-    image_id = str(uuid4())
-    staging_path = f"staging/{image_id}_{int(datetime.utcnow().timestamp())}"
-
+    # 1. HTTP-Level Validation: MIME Type Check
+    # This stays in router because it's about HTTP request parsing
+    detected_mime = await validate_image_file(file)
     logger.debug(
-        "upload_identifiers_generated",
-        job_id=job_id,
-        image_id=image_id,
-        staging_path=staging_path,
+        "image_validation_success",
+        filename=file.filename,
+        detected_mime=detected_mime,
+        declared_content_type=file.content_type,
     )
 
-    # Augment metadata with processing info
-    processing_metadata = {
-        **meta,
-        "uploader_id": auth.user_id,
-        "org_id": auth.org_id,
-        "original_filename": file.filename,
-        "detected_mime_type": detected_mime,
-        "content_length": content_length,
-    }
+    # 2. Delegate to Service Layer (Business Logic)
+    result = await service.process_new_upload(
+        file=file,
+        bucket=bucket,
+        auth_user_id=auth.user_id,
+        auth_org_id=auth.org_id,
+        metadata_json=metadata,
+        content_length=content_length,
+        detected_mime=detected_mime
+    )
 
-    # Create job in database
-    try:
-        await db.create_job(
-            job_id=job_id,
-            image_id=image_id,
-            storage_bucket=bucket,
-            staging_path=staging_path,
-            metadata=processing_metadata
-        )
-        logger.debug(
-            "job_created_in_database",
-            job_id=job_id,
-            image_id=image_id,
-        )
-    except Exception as exc:
-        logger.error(
-            "job_creation_failed",
-            job_id=job_id,
-            image_id=image_id,
-            error_type=type(exc).__name__,
-            error=str(exc),
-            exc_info=True,
-        )
-        raise HTTPException(status_code=500, detail="Failed to create processing job")
-
-    # Save to staging area
-    try:
-        await storage.save(file.file, bucket, staging_path)
-        logger.info(
-            "file_saved_to_staging",
-            job_id=job_id,
-            image_id=image_id,
-            bucket=bucket,
-            staging_path=staging_path,
-        )
-    except Exception as exc:
-        logger.error(
-            "staging_save_failed",
-            job_id=job_id,
-            image_id=image_id,
-            bucket=bucket,
-            staging_path=staging_path,
-            error_type=type(exc).__name__,
-            error=str(exc),
-            exc_info=True,
-        )
-        raise HTTPException(status_code=500, detail="Failed to save file to staging")
-
-    # Queue processing task (async via Celery)
-    try:
-        process_image_task.delay(job_id)
-        logger.info(
-            "processing_task_queued",
-            job_id=job_id,
-            image_id=image_id,
-        )
-    except Exception as exc:
-        logger.error(
-            "task_queue_failed",
-            job_id=job_id,
-            image_id=image_id,
-            error_type=type(exc).__name__,
-            error=str(exc),
-            exc_info=True,
-        )
-        raise HTTPException(status_code=500, detail="Failed to queue processing task")
-
-    # Return 202 Accepted
+    # 3. Construct HTTP Response
     logger.info(
         "upload_accepted",
-        job_id=job_id,
-        image_id=image_id,
+        job_id=result["job_id"],
+        image_id=result["image_id"],
         user_id=auth.user_id,
         org_id=auth.org_id,
         filename=file.filename,
-        rate_limit_remaining=rate_limit_result["remaining"],
+        rate_limit_remaining=rate_limit["remaining"],
     )
 
     return JSONResponse(
-        status_code=202,
+        status_code=status.HTTP_202_ACCEPTED,
         content={
-            "job_id": job_id,
-            "image_id": image_id,
-            "status_url": f"/api/v1/images/jobs/{job_id}",
+            "job_id": result["job_id"],
+            "image_id": result["image_id"],
+            "status_url": result["status_url"],
             "message": "Upload accepted. Processing initiated."
         },
         headers={
             "X-RateLimit-Limit": str(settings.RATE_LIMIT_MAX_UPLOADS),
-            "X-RateLimit-Remaining": str(rate_limit_result["remaining"]),
-            "X-RateLimit-Reset": rate_limit_result["reset_at"]
+            "X-RateLimit-Remaining": str(rate_limit["remaining"]),
+            "X-RateLimit-Reset": rate_limit["reset_at"]
         }
     )
 
