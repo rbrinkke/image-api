@@ -1,7 +1,7 @@
 """Application configuration using Pydantic Settings."""
 
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 
 
 class Settings(BaseSettings):
@@ -23,7 +23,11 @@ class Settings(BaseSettings):
     # Storage Backend Configuration
     STORAGE_BACKEND: str = "local"  # Options: "local" or "s3"
     STORAGE_PATH: str = "/data/storage"
+
+    # S3 Storage Configuration
     AWS_REGION: str = "eu-west-1"
+    AWS_S3_BUCKET_NAME: str = "image-api-dev"  # Physical S3 bucket name
+    AWS_ENDPOINT_URL: Optional[str] = None  # For MinIO or S3-compatible services
 
     # Celery & Redis
     REDIS_URL: str = "redis://redis:6379/0"
