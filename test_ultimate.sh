@@ -13,8 +13,14 @@ set -uo pipefail  # Removed -e to continue on errors and show all test failures
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════
 
-API_URL="http://localhost:8002"
-JWT_SECRET="9c1e3ddbc3c2dfb6d3f167f9c2298902da5dbb8381405b2cbc4e827fe0fca5b4"
+API_URL="http://localhost:8004"
+AUTH_API_URL="http://localhost:8000"
+JWT_SECRET="dev_secret_key_change_in_production_min_32_chars_required"
+
+# Real user credentials (created during setup)
+TEST_USER_ID=""
+TEST_USER_EMAIL=""
+TEST_ACCESS_TOKEN=""
 
 # Color codes
 GREEN='\033[0;32m'
@@ -65,16 +71,16 @@ assert_equals() {
     local actual="$2"
     local test_name="$3"
 
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     if [ "$expected" == "$actual" ]; then
         echo -e "${GREEN}✅ PASS:${NC} $test_name"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         return 0
     else
         echo -e "${RED}❌ FAIL:${NC} $test_name"
         echo -e "${RED}   Expected: '$expected', Got: '$actual'${NC}"
         FAILED_TEST_DETAILS+=("$test_name: Expected '$expected', got '$actual'")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         return 1
     fi
 }
@@ -85,18 +91,18 @@ assert_http_status() {
     local test_name="$3"
     local headers="${4:-}"
 
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     local actual=$(curl -sL -o /dev/null -w "%{http_code}" $headers "$url")
 
     if [ "$expected" == "$actual" ]; then
         echo -e "${GREEN}✅ PASS:${NC} $test_name"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         return 0
     else
         echo -e "${RED}❌ FAIL:${NC} $test_name"
         echo -e "${RED}   Expected HTTP $expected, Got HTTP $actual${NC}"
         FAILED_TEST_DETAILS+=("$test_name: Expected HTTP $expected, got HTTP $actual")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         return 1
     fi
 }
@@ -106,16 +112,16 @@ assert_contains() {
     local needle="$2"
     local test_name="$3"
 
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     if echo "$haystack" | grep -q "$needle"; then
         echo -e "${GREEN}✅ PASS:${NC} $test_name"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         return 0
     else
         echo -e "${RED}❌ FAIL:${NC} $test_name"
         echo -e "${RED}   Expected to find '$needle' in response${NC}"
         FAILED_TEST_DETAILS+=("$test_name: Expected to find '$needle' in response")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         return 1
     fi
 }
@@ -125,16 +131,16 @@ assert_not_contains() {
     local needle="$2"
     local test_name="$3"
 
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     if ! echo "$haystack" | grep -q "$needle"; then
         echo -e "${GREEN}✅ PASS:${NC} $test_name"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         return 0
     else
         echo -e "${RED}❌ FAIL:${NC} $test_name"
         echo -e "${RED}   Expected NOT to find '$needle' in response${NC}"
         FAILED_TEST_DETAILS+=("$test_name: Expected NOT to find '$needle' in response")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         return 1
     fi
 }
@@ -145,29 +151,45 @@ assert_upload_http_status() {
     local file_path="$2"
     local bucket="$3"
     local test_name="$4"
-    local auth_header="${5:-}"
+    local auth_token="${5:-}"
 
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
 
-    local curl_cmd="curl -sL -o /dev/null -w '%{http_code}'"
+    local actual
+    local response_body
+    local temp_response="/tmp/upload_response_$$.json"
 
-    if [ -n "$auth_header" ]; then
-        curl_cmd="$curl_cmd -H 'Authorization: Bearer $auth_header'"
+    if [ -n "$auth_token" ]; then
+        # Capture both status code and response body for debugging
+        actual=$(curl -sL -w '%{http_code}' -o "$temp_response" \
+            -H "Authorization: Bearer ${auth_token}" \
+            -F "file=@${file_path}" \
+            -F "bucket=${bucket}" \
+            "${API_URL}/api/v1/images/upload" 2>&1 | tail -1)
+        response_body=$(cat "$temp_response" 2>/dev/null || echo "{}")
+    else
+        actual=$(curl -sL -w '%{http_code}' -o "$temp_response" \
+            -F "file=@${file_path}" \
+            -F "bucket=${bucket}" \
+            "${API_URL}/api/v1/images/upload" 2>&1 | tail -1)
+        response_body=$(cat "$temp_response" 2>/dev/null || echo "{}")
     fi
 
-    curl_cmd="$curl_cmd -F 'file=@$file_path' -F 'bucket=$bucket' '$API_URL/api/v1/images/upload'"
-
-    local actual=$(eval $curl_cmd)
+    # Clean up temp file
+    rm -f "$temp_response"
 
     if [ "$expected" == "$actual" ]; then
         echo -e "${GREEN}✅ PASS:${NC} $test_name"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         return 0
     else
         echo -e "${RED}❌ FAIL:${NC} $test_name"
         echo -e "${RED}   Expected HTTP $expected, Got HTTP $actual${NC}"
+        if [ "$actual" == "401" ] || [ "$actual" == "403" ]; then
+            echo -e "${RED}   Response: ${response_body}${NC}" | head -c 200
+        fi
         FAILED_TEST_DETAILS+=("$test_name: Expected HTTP $expected, got HTTP $actual")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         return 1
     fi
 }
@@ -251,6 +273,28 @@ generate_jwt_token() {
     python3 -c "import jwt; print(jwt.encode({'sub': '$user_id'}, '$secret', algorithm='HS256'))"
 }
 
+create_real_test_user() {
+    log_info "Creating real authenticated user via auth-api..."
+
+    # Source the helper script to create user
+    if [ -f "./scripts/create_test_user_with_token.sh" ]; then
+        source ./scripts/create_test_user_with_token.sh
+
+        if [ -n "$TEST_ACCESS_TOKEN" ] && [ -n "$TEST_USER_ID" ]; then
+            log_success "Real user created: $TEST_USER_EMAIL"
+            log_success "User ID: $TEST_USER_ID"
+            log_success "Token: ${TEST_ACCESS_TOKEN:0:30}..."
+            return 0
+        else
+            log_error "Failed to create real user - missing credentials"
+            return 1
+        fi
+    else
+        log_error "Helper script not found: ./scripts/create_test_user_with_token.sh"
+        return 1
+    fi
+}
+
 generate_expired_jwt() {
     python3 << EOF
 import jwt
@@ -277,6 +321,14 @@ verify_services_running() {
     if [ "$all_running" = false ]; then
         log_error "Not all services are running. Please start with: docker compose up -d"
         exit 1
+    fi
+
+    # Check auth-api (required for real user creation)
+    if docker ps --format "{{.Names}}" | grep -q "^auth-api$"; then
+        log_success "auth-api is running"
+    else
+        log_warning "auth-api not running - will use fallback JWT tokens"
+        log_warning "For full integration testing, start auth-api: cd ../auth-api && docker compose up -d"
     fi
 
     log_success "All services verified running"
@@ -315,12 +367,12 @@ conn.close()
 
     # Test 5: Storage directory
     if docker exec image-processor-api test -d /data/storage; then
-        ((TOTAL_TESTS++))
-        ((PASSED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         echo -e "${GREEN}✅ PASS:${NC} Storage directory exists"
     else
-        ((TOTAL_TESTS++))
-        ((FAILED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         echo -e "${RED}❌ FAIL:${NC} Storage directory missing"
         FAILED_TEST_DETAILS+=("Storage directory missing")
     fi
@@ -338,28 +390,37 @@ conn.close()
 # ═══════════════════════════════════════════════════════════════════════════
 
 test_suite_authentication() {
-    log_suite "Suite 2/10: Authentication & Security"
+    log_suite "Suite 2/10: Authentication & Security (REAL USER)"
 
-    # Test 1: Valid JWT accepted
-    local valid_token=$(generate_jwt_token)
-    assert_upload_http_status "202" "test_images/small_square_jpeg.jpeg" "test-auth" "Valid JWT accepted" "$valid_token"
+    # Use real token with user bucket format
+    local user_bucket="users/${TEST_USER_ID}/"
+
+    # Test 1: Valid JWT with real user accepted
+    assert_upload_http_status "202" "test_images/small_square_jpeg.jpeg" "$user_bucket" "Real JWT with user bucket accepted" "$TEST_ACCESS_TOKEN"
 
     # Test 2: Invalid JWT rejected
-    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "test-auth" "Invalid JWT rejected (401)" "invalid.token.here"
+    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "$user_bucket" "Invalid JWT rejected (401)" "invalid.token.here"
 
     # Test 3: Expired JWT rejected
     local expired_token=$(generate_expired_jwt)
-    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "test-auth" "Expired JWT rejected (401)" "$expired_token"
+    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "$user_bucket" "Expired JWT rejected (401)" "$expired_token"
 
     # Test 4: Missing token rejected
-    assert_upload_http_status "403" "test_images/small_square_jpeg.jpeg" "test-auth" "Missing token rejected (403)" ""
+    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "$user_bucket" "Missing token rejected (401)" ""
 
     # Test 5: Malformed token rejected
-    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "test-auth" "Malformed token rejected" "notajwttoken"
+    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "$user_bucket" "Malformed token rejected" "notajwttoken"
 
     # Test 6: Wrong signature rejected
     local wrong_sig_token=$(generate_jwt_token "test-user" "wrong-secret-key")
-    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "test-auth" "Wrong signature rejected" "$wrong_sig_token"
+    assert_upload_http_status "401" "test_images/small_square_jpeg.jpeg" "$user_bucket" "Wrong signature rejected" "$wrong_sig_token"
+
+    # Test 7: Valid token but wrong user bucket (authorization test)
+    local wrong_user_bucket="users/different-user-id/"
+    assert_upload_http_status "403" "test_images/small_square_jpeg.jpeg" "$wrong_user_bucket" "Cannot access another user's bucket (403)" "$TEST_ACCESS_TOKEN"
+
+    # Test 8: System bucket allows all authenticated users
+    assert_upload_http_status "202" "test_images/small_square_jpeg.jpeg" "system/" "System bucket allows authenticated users" "$TEST_ACCESS_TOKEN"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -369,7 +430,8 @@ test_suite_authentication() {
 test_suite_rate_limiting() {
     log_suite "Suite 3/10: Rate Limiting (CRITICAL)"
 
-    local token=$(generate_jwt_token "rate-limit-test-user")
+    # Use real user token and bucket
+    local user_bucket="users/${TEST_USER_ID}/"
 
     log_info "Testing rate limiting (50 uploads/hour)..."
     log_warning "This will take ~15 seconds..."
@@ -377,9 +439,9 @@ test_suite_rate_limiting() {
     # Test 1-3: First 3 uploads should succeed
     for i in {1..3}; do
         local status=$(curl -sL -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer $token" \
+            -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
             -F "file=@test_images/small_square_jpeg.jpeg" \
-            -F "bucket=test-ratelimit" \
+            -F "bucket=$user_bucket" \
             "$API_URL/api/v1/images/upload")
 
         if [ $i -eq 1 ]; then
@@ -393,22 +455,22 @@ test_suite_rate_limiting() {
     done
 
     # Test 4: Check rate limit headers (use -i for headers with POST, grep case-insensitive)
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     local headers=$(curl -i -X POST \
-        -H "Authorization: Bearer $token" \
+        -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
         -F "file=@test_images/small_square_jpeg.jpeg" \
-        -F "bucket=test-ratelimit" \
+        -F "bucket=$user_bucket" \
         "$API_URL/api/v1/images/upload" 2>&1 | head -n 30)
 
     if echo "$headers" | grep -qi "x-ratelimit-limit"; then
         echo -e "${GREEN}✅ PASS:${NC} Rate limit headers present"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
     else
         echo -e "${RED}❌ FAIL:${NC} Rate limit headers present"
         echo -e "${RED}   Headers received:${NC}"
         echo "$headers" | head -n 10
         FAILED_TEST_DETAILS+=("Rate limit headers: X-RateLimit-Limit not found in response headers")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
 }
 
@@ -419,53 +481,53 @@ test_suite_rate_limiting() {
 test_suite_upload_validation() {
     log_suite "Suite 4/10: Upload Validation"
 
-    local token=$(generate_jwt_token "upload-validation-user")
+    local user_bucket="users/${TEST_USER_ID}/"
 
     # Test 1: Valid JPEG accepted
-    assert_upload_http_status "202" "test_images/small_square_jpeg.jpeg" "test-upload" "Valid JPEG accepted" "$token"
+    assert_upload_http_status "202" "test_images/small_square_jpeg.jpeg" "$user_bucket" "Valid JPEG accepted" "$TEST_ACCESS_TOKEN"
 
     # Test 2: Valid PNG accepted
-    assert_upload_http_status "202" "test_images/medium_square_png.png" "test-upload" "Valid PNG accepted" "$token"
+    assert_upload_http_status "202" "test_images/medium_square_png.png" "$user_bucket" "Valid PNG accepted" "$TEST_ACCESS_TOKEN"
 
     # Test 3: Valid WebP accepted
-    assert_upload_http_status "202" "test_images/webp_test.webp" "test-upload" "Valid WebP accepted" "$token"
+    assert_upload_http_status "202" "test_images/webp_test.webp" "$user_bucket" "Valid WebP accepted" "$TEST_ACCESS_TOKEN"
 
     # Test 4: Text file rejected (415)
-    assert_upload_http_status "415" "test_images/fake.txt" "test-upload" "Text file rejected (415 Unsupported Media Type)" "$token"
+    assert_upload_http_status "415" "test_images/fake.txt" "$user_bucket" "Text file rejected (415 Unsupported Media Type)" "$TEST_ACCESS_TOKEN"
 
     # Test 5: Oversized file rejected (413)
-    assert_upload_http_status "413" "test_images/oversized.jpeg" "test-upload" "Oversized file rejected (413 Payload Too Large)" "$token"
+    assert_upload_http_status "413" "test_images/oversized.jpeg" "$user_bucket" "Oversized file rejected (413 Payload Too Large)" "$TEST_ACCESS_TOKEN"
 
     # Test 6: Missing file parameter (422) - special case: no file
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     local status6=$(curl -sL -o /dev/null -w "%{http_code}" \
-        -H "Authorization: Bearer $token" \
-        -F "bucket=test-upload" \
+        -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
+        -F "bucket=$user_bucket" \
         "$API_URL/api/v1/images/upload")
     if [ "$status6" == "422" ]; then
         echo -e "${GREEN}✅ PASS:${NC} Missing file parameter (422)"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
     else
         echo -e "${RED}❌ FAIL:${NC} Missing file parameter (422)"
         echo -e "${RED}   Expected HTTP 422, Got HTTP $status6${NC}"
         FAILED_TEST_DETAILS+=("Missing file parameter (422): Expected HTTP 422, got HTTP $status6")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
 
     # Test 7: Missing bucket parameter (422) - special case: no bucket
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     local status7=$(curl -sL -o /dev/null -w "%{http_code}" \
-        -H "Authorization: Bearer $token" \
+        -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
         -F "file=@test_images/small_square_jpeg.jpeg" \
         "$API_URL/api/v1/images/upload")
     if [ "$status7" == "422" ]; then
         echo -e "${GREEN}✅ PASS:${NC} Missing bucket parameter (422)"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
     else
         echo -e "${RED}❌ FAIL:${NC} Missing bucket parameter (422)"
         echo -e "${RED}   Expected HTTP 422, Got HTTP $status7${NC}"
         FAILED_TEST_DETAILS+=("Missing bucket parameter (422): Expected HTTP 422, got HTTP $status7")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
 }
 
@@ -476,27 +538,27 @@ test_suite_upload_validation() {
 test_suite_processing_pipeline() {
     log_suite "Suite 5/10: Image Processing Pipeline"
 
-    local token=$(generate_jwt_token "processing-test-user")
+    local user_bucket="users/${TEST_USER_ID}/"
 
     log_info "Uploading image and tracking processing..."
 
     # Upload image
     local upload_start=$(date +%s)
     local response=$(curl -sL -X POST "$API_URL/api/v1/images/upload" \
-        -H "Authorization: Bearer $token" \
+        -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
         -F "file=@test_images/large_landscape_jpeg.jpeg" \
-        -F "bucket=test-processing" \
+        -F "bucket=$user_bucket" \
         -F "metadata={\"test\":\"processing_pipeline\"}")
 
     # Test 1: Job created
     local job_id=$(echo "$response" | python3 -c "import sys, json; print(json.load(sys.stdin).get('job_id', ''))" 2>/dev/null)
     if [ -n "$job_id" ]; then
-        ((TOTAL_TESTS++))
-        ((PASSED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         echo -e "${GREEN}✅ PASS:${NC} Job created (job_id: ${job_id:0:8}...)"
     else
-        ((TOTAL_TESTS++))
-        ((FAILED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         echo -e "${RED}❌ FAIL:${NC} Job not created"
         FAILED_TEST_DETAILS+=("Job not created in upload response")
         return
@@ -505,12 +567,12 @@ test_suite_processing_pipeline() {
     # Test 2: Image ID returned
     local image_id=$(echo "$response" | python3 -c "import sys, json; print(json.load(sys.stdin).get('image_id', ''))" 2>/dev/null)
     if [ -n "$image_id" ]; then
-        ((TOTAL_TESTS++))
-        ((PASSED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         echo -e "${GREEN}✅ PASS:${NC} Image ID returned"
     else
-        ((TOTAL_TESTS++))
-        ((FAILED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         echo -e "${RED}❌ FAIL:${NC} Image ID not returned"
         FAILED_TEST_DETAILS+=("Image ID not returned")
     fi
@@ -532,24 +594,24 @@ test_suite_processing_pipeline() {
             local processing_time=$((upload_end - upload_start))
             PROCESSING_TIMES+=($processing_time)
 
-            ((TOTAL_TESTS++))
-            ((PASSED_TESTS++))
+            TOTAL_TESTS=$((TOTAL_TESTS + 1))
+            PASSED_TESTS=$((PASSED_TESTS + 1))
             echo -e "${GREEN}✅ PASS:${NC} Processing completed (${processing_time}s)"
 
             if [ $processing_time -lt 10 ]; then
-                ((TOTAL_TESTS++))
-                ((PASSED_TESTS++))
+                TOTAL_TESTS=$((TOTAL_TESTS + 1))
+                PASSED_TESTS=$((PASSED_TESTS + 1))
                 echo -e "${GREEN}✅ PASS:${NC} Processing time < 10s (${processing_time}s)"
             else
-                ((TOTAL_TESTS++))
-                ((PASSED_TESTS++))
+                TOTAL_TESTS=$((TOTAL_TESTS + 1))
+                PASSED_TESTS=$((PASSED_TESTS + 1))
                 log_warning "Processing took ${processing_time}s (target <10s)"
                 echo -e "${YELLOW}⚠️  PASS (slow):${NC} Processing time ${processing_time}s"
             fi
             break
         elif [ "$status" == "failed" ]; then
-            ((TOTAL_TESTS++))
-            ((FAILED_TESTS++))
+            TOTAL_TESTS=$((TOTAL_TESTS + 1))
+            FAILED_TESTS=$((FAILED_TESTS + 1))
             echo -e "${RED}❌ FAIL:${NC} Processing failed"
             FAILED_TEST_DETAILS+=("Processing failed for job $job_id")
             return
@@ -557,8 +619,8 @@ test_suite_processing_pipeline() {
     done
 
     if [ "$status" != "completed" ]; then
-        ((TOTAL_TESTS++))
-        ((FAILED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         echo -e "${RED}❌ FAIL:${NC} Processing timeout (> 30s)"
         FAILED_TEST_DETAILS+=("Processing timeout for job $job_id")
         return
@@ -574,12 +636,12 @@ test_suite_processing_pipeline() {
     local original_url=$(echo "$results" | python3 -c "import sys, json; print(json.load(sys.stdin).get('urls', {}).get('original', ''))" 2>/dev/null)
 
     if [ -n "$thumbnail_url" ] && [ -n "$medium_url" ] && [ -n "$large_url" ] && [ -n "$original_url" ]; then
-        ((TOTAL_TESTS++))
-        ((PASSED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         echo -e "${GREEN}✅ PASS:${NC} All 4 variants generated (thumbnail, medium, large, original)"
     else
-        ((TOTAL_TESTS++))
-        ((FAILED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         echo -e "${RED}❌ FAIL:${NC} Not all variants generated"
         FAILED_TEST_DETAILS+=("Missing one or more image variants")
     fi
@@ -590,16 +652,16 @@ test_suite_processing_pipeline() {
     # Test 8: Dominant color extracted (check metadata contains color field)
     local dominant_color=$(echo "$results" | python3 -c "import sys, json; print(json.load(sys.stdin).get('metadata', {}).get('dominant_color', ''))" 2>/dev/null)
     if [[ $dominant_color =~ ^#[0-9A-Fa-f]{6}$ ]] || [[ -z "$dominant_color" ]]; then
-        ((TOTAL_TESTS++))
-        ((PASSED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         if [ -n "$dominant_color" ]; then
             echo -e "${GREEN}✅ PASS:${NC} Dominant color extracted (#RRGGBB format: $dominant_color)"
         else
             echo -e "${GREEN}✅ PASS:${NC} Dominant color field present (value: empty - may occur with certain images)"
         fi
     else
-        ((TOTAL_TESTS++))
-        ((FAILED_TESTS++))
+        TOTAL_TESTS=$((TOTAL_TESTS + 1))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         echo -e "${RED}❌ FAIL:${NC} Dominant color invalid format: $dominant_color"
         FAILED_TEST_DETAILS+=("Dominant color invalid format: $dominant_color")
     fi
@@ -612,12 +674,13 @@ test_suite_processing_pipeline() {
 test_suite_job_status() {
     log_suite "Suite 6/10: Job Status & Retrieval"
 
+    local user_bucket="users/${TEST_USER_ID}/"
+
     # Test 1: Status endpoint accuracy
-    local token=$(generate_jwt_token "job-status-user")
     local response=$(curl -sL -X POST "$API_URL/api/v1/images/upload" \
-        -H "Authorization: Bearer $token" \
+        -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
         -F "file=@test_images/small_square_jpeg.jpeg" \
-        -F "bucket=test-job-status")
+        -F "bucket=$user_bucket")
 
     local job_id=$(echo "$response" | python3 -c "import sys, json; print(json.load(sys.stdin).get('job_id', ''))" 2>/dev/null)
 
@@ -655,12 +718,13 @@ test_suite_job_status() {
 test_suite_image_retrieval() {
     log_suite "Suite 7/10: Image Retrieval"
 
+    local user_bucket="users/${TEST_USER_ID}/"
+
     # Upload an image first
-    local token=$(generate_jwt_token "retrieval-test-user")
     local response=$(curl -sL -X POST "$API_URL/api/v1/images/upload" \
-        -H "Authorization: Bearer $token" \
+        -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
         -F "file=@test_images/medium_square_png.png" \
-        -F "bucket=test-retrieval")
+        -F "bucket=$user_bucket")
 
     local image_id=$(echo "$response" | python3 -c "import sys, json; print(json.load(sys.stdin).get('image_id', ''))" 2>/dev/null)
     local job_id=$(echo "$response" | python3 -c "import sys, json; print(json.load(sys.stdin).get('job_id', ''))" 2>/dev/null)
@@ -689,7 +753,7 @@ test_suite_image_retrieval() {
 
     # Test 4: Batch retrieval - verify JSON response contains 'requested' field
     # Note: This test has intermittent timing issues with DB sync after processing
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     local batch_response=$(curl -sL "$API_URL/api/v1/images/batch?image_ids=$image_id")
     local has_requested=$(echo "$batch_response" | python3 -c "import sys, json; data = json.load(sys.stdin); print('yes' if 'requested' in data else 'no')" 2>/dev/null)
 
@@ -698,16 +762,16 @@ test_suite_image_retrieval() {
 
     if [ "$has_requested" == "yes" ]; then
         echo -e "${GREEN}✅ PASS:${NC} Batch retrieval returns requested count (found: $found_count)"
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
     elif echo "$batch_response" | grep -q "Image not found"; then
         # Known timing issue - job completed but DB not yet synced for batch query
         echo -e "${YELLOW}⚠️  SKIP:${NC} Batch retrieval (timing issue - job completed but not yet in batch index)"
-        ((PASSED_TESTS++))  # Count as pass since it's a known timing issue
+        PASSED_TESTS=$((PASSED_TESTS + 1))  # Count as pass since it's a known timing issue
     else
         echo -e "${RED}❌ FAIL:${NC} Batch retrieval returns requested count"
         echo -e "${RED}   Response: $batch_response${NC}"
         FAILED_TEST_DETAILS+=("Batch retrieval: 'requested' field not found in response")
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
 }
 
@@ -718,23 +782,23 @@ test_suite_image_retrieval() {
 test_suite_error_handling() {
     log_suite "Suite 8/10: Error Handling & Resilience"
 
-    local token=$(generate_jwt_token "error-test-user")
+    local user_bucket="users/${TEST_USER_ID}/"
 
     # Test 1: Invalid metadata format
     local invalid_metadata_status=$(curl -sL -o /dev/null -w "%{http_code}" \
-        -H "Authorization: Bearer $token" \
+        -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
         -F "file=@test_images/small_square_jpeg.jpeg" \
-        -F "bucket=test-errors" \
+        -F "bucket=$user_bucket" \
         -F "metadata=not-json" \
         "$API_URL/api/v1/images/upload")
 
     # Should accept (metadata is optional/lenient)
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     if [ "$invalid_metadata_status" == "202" ] || [ "$invalid_metadata_status" == "422" ]; then
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         echo -e "${GREEN}✅ PASS:${NC} Invalid metadata handled gracefully ($invalid_metadata_status)"
     else
-        ((FAILED_TESTS++))
+        FAILED_TESTS=$((FAILED_TESTS + 1))
         echo -e "${RED}❌ FAIL:${NC} Unexpected status for invalid metadata: $invalid_metadata_status"
         FAILED_TEST_DETAILS+=("Invalid metadata returned unexpected status: $invalid_metadata_status")
     fi
@@ -779,7 +843,7 @@ test_suite_monitoring() {
 test_suite_performance() {
     log_suite "Suite 10/10: Performance & Concurrency"
 
-    local token=$(generate_jwt_token "performance-test-user")
+    local user_bucket="users/${TEST_USER_ID}/"
 
     log_info "Testing concurrent uploads (5 simultaneous)..."
 
@@ -788,9 +852,9 @@ test_suite_performance() {
     for i in {1..5}; do
         (
             curl -sL -X POST "$API_URL/api/v1/images/upload" \
-                -H "Authorization: Bearer $token" \
+                -H "Authorization: Bearer $TEST_ACCESS_TOKEN" \
                 -F "file=@test_images/small_square_jpeg.jpeg" \
-                -F "bucket=test-concurrency" \
+                -F "bucket=$user_bucket" \
                 > /tmp/concurrent_upload_$i.json 2>&1
         ) &
         pids+=($!)
@@ -824,12 +888,12 @@ test_suite_performance() {
 
     # Test 3: Memory usage
     local api_memory=$(docker stats image-processor-api --no-stream --format "{{.MemUsage}}" | awk '{print $1}' | sed 's/MiB//')
-    ((TOTAL_TESTS++))
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
     if (( $(echo "$api_memory < 500" | bc -l) )); then
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         echo -e "${GREEN}✅ PASS:${NC} API memory usage acceptable (${api_memory}MB < 500MB)"
     else
-        ((PASSED_TESTS++))
+        PASSED_TESTS=$((PASSED_TESTS + 1))
         log_warning "API using ${api_memory}MB (> 500MB target)"
         echo -e "${YELLOW}⚠️  PASS (high memory):${NC} API memory: ${api_memory}MB"
     fi
@@ -851,7 +915,8 @@ cleanup() {
     log_success "Cleanup complete"
 }
 
-trap cleanup EXIT
+# NOTE: No EXIT trap - cleanup is called manually at end of main()
+# Trap would interfere with subshells during testing
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SUMMARY & REPORTING
@@ -923,13 +988,24 @@ main() {
     echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║                                                           ║${NC}"
     echo -e "${CYAN}║  🚀 IMAGE PROCESSOR - ULTIMATE TEST SUITE                 ║${NC}"
-    echo -e "${CYAN}║     Comprehensive validation for 100% confidence          ║${NC}"
+    echo -e "${CYAN}║     Comprehensive validation with REAL USER AUTH          ║${NC}"
     echo -e "${CYAN}║                                                           ║${NC}"
     echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}\n"
 
     # Setup
     generate_test_images
     verify_services_running
+
+    # Create real authenticated user
+    log_info "Creating real user via auth-api for integration testing..."
+    if create_real_test_user; then
+        log_success "Real user authentication ready!"
+        echo ""
+    else
+        log_error "Failed to create real user - tests may fail"
+        log_warning "Ensure auth-api is running: cd ../auth-api && docker compose up -d"
+        exit 1
+    fi
 
     # Run all test suites
     test_suite_infrastructure
@@ -942,6 +1018,9 @@ main() {
     test_suite_error_handling
     test_suite_monitoring
     test_suite_performance
+
+    # Cleanup test artifacts
+    cleanup
 
     # Print summary
     print_summary

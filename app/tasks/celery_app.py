@@ -22,6 +22,13 @@ celery_app.conf.update(
     task_acks_late=settings.CELERY_TASK_ACKS_LATE,
     worker_prefetch_multiplier=settings.CELERY_WORKER_PREFETCH_MULTIPLIER,
     worker_max_tasks_per_child=settings.CELERY_WORKER_MAX_TASKS_PER_CHILD,
+    # Redis connection options for redis-py 5.0+ compatibility
+    # Disable health_check to avoid authentication errors with redis-py 5.0
+    broker_connection_retry_on_startup=True,
+    broker_transport_options={
+        'health_check_interval': 0,
+    },
+    redis_backend_health_check_interval=0,
 )
 
 # Import tasks to register them with Celery
