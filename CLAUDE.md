@@ -126,7 +126,16 @@ See `app/db/schema.sql` for complete definitions.
 Protocol-based design allows seamless switching between storage backends:
 
 - **LocalStorageBackend**: `/data/storage/{bucket}/{path}` - Development/testing
-- **S3StorageBackend**: AWS S3 with presigned URLs - Production
+- **S3StorageBackend**: Single-bucket S3 architecture with logical prefixes - Production
+
+**Production-Ready S3 Architecture:**
+The S3 backend uses industry-standard single-bucket architecture where:
+- **Physical bucket**: One S3 bucket per environment (e.g., `image-api-prod`)
+- **Logical buckets**: Authorization paths become object prefixes (e.g., `org-123/groups/abc`)
+- **Object keys**: Formed as `{logical-bucket}/{file-path}` within the physical bucket
+- **MinIO support**: Full S3-compatible for local development via `AWS_ENDPOINT_URL`
+
+This approach avoids bucket proliferation, simplifies management, and follows AWS best practices.
 
 Switch backends by changing `STORAGE_BACKEND=s3` in `.env` - zero code changes needed!
 
@@ -164,18 +173,41 @@ All images processed into 4 variants maintaining aspect ratio:
 
 ### Storage Backend Migration
 
+**Option 1: AWS S3 (Production)**
 ```bash
-# Local → S3 migration (zero code changes)
-# 1. Update .env:
+# Local → AWS S3 migration
+# 1. Create S3 bucket in AWS (e.g., image-api-prod)
+# 2. Update .env:
 STORAGE_BACKEND=s3
 AWS_REGION=eu-west-1
+AWS_S3_BUCKET_NAME=image-api-prod
 AWS_ACCESS_KEY_ID=your-key
 AWS_SECRET_ACCESS_KEY=your-secret
+# AWS_ENDPOINT_URL should be empty or omitted for real AWS S3
 
-# 2. Restart services
+# 3. Restart services
 docker compose restart
 
-# All new uploads go to S3!
+# All new uploads go to S3: s3://image-api-prod/org-123/groups/abc/processed/...
+```
+
+**Option 2: MinIO (Development/Testing)**
+```bash
+# Local → MinIO migration (S3-compatible)
+# 1. Start MinIO (docker or standalone)
+# 2. Create bucket in MinIO web UI (e.g., image-api-dev)
+# 3. Update .env:
+STORAGE_BACKEND=s3
+AWS_REGION=eu-west-1
+AWS_S3_BUCKET_NAME=image-api-dev
+AWS_ACCESS_KEY_ID=minioadmin
+AWS_SECRET_ACCESS_KEY=minioadmin
+AWS_ENDPOINT_URL=http://minio:9000
+
+# 4. Restart services
+docker compose restart
+
+# All uploads go to MinIO: http://minio:9000/image-api-dev/org-123/groups/abc/processed/...
 ```
 
 ## API Endpoints
@@ -202,12 +234,20 @@ Critical settings:
 - `JWT_SECRET_KEY`: MUST change in production (min 32 chars) - `openssl rand -hex 32`
 - `STORAGE_BACKEND`: `local` or `s3`
 - `STORAGE_PATH`: Local storage path (default: `/data/storage`)
+- `AWS_S3_BUCKET_NAME`: Physical S3 bucket name (required for S3 backend)
+- `AWS_REGION`: AWS region (default: `eu-west-1`)
+- `AWS_ENDPOINT_URL`: S3-compatible endpoint for MinIO (optional, omit for AWS S3)
 - `DATABASE_PATH`: SQLite database path (default: `/data/processor.db`)
 - `REDIS_URL`: Redis connection (default: `redis://redis:6379/0`)
 - `RATE_LIMIT_MAX_UPLOADS`: Uploads per hour per user (default: 50)
 - `MAX_UPLOAD_SIZE_MB`: Maximum file size (default: 10)
 - `WEBP_QUALITY`: WebP compression quality 0-100 (default: 85)
 - `ALLOWED_MIME_TYPES`: JSON array of allowed types
+
+**S3 Configuration Validation:**
+- Bucket names must follow AWS naming rules (3-63 chars, lowercase, alphanumeric + hyphens/dots)
+- Endpoint URL must start with http:// or https:// if provided
+- When `STORAGE_BACKEND=s3`, both `AWS_S3_BUCKET_NAME` and `AWS_REGION` are required
 
 See `.env.example` for all options.
 
@@ -271,6 +311,7 @@ See `DASHBOARD.md` for complete documentation.
 
 ## Security Features
 
+### Application Security
 1. **JWT Authentication**: Token validation for upload/delete operations
 2. **Magic Bytes Validation**: Never trust client MIME types - uses `python-magic`
 3. **Content-Length Pre-Check**: Rejects oversized uploads before processing
@@ -278,9 +319,18 @@ See `DASHBOARD.md` for complete documentation.
 5. **Database-Enforced Rate Limiting**: 50 uploads/hour per user (configurable)
 6. **Retry Logic**: 3 attempts with 60s delay for failed processing
 7. **Audit Trail**: All events logged in `image_upload_events` table
-8. **Storage Encryption**: S3 server-side encryption (AES256)
-9. **Presigned URLs**: 1-hour expiration for S3 access
-10. **Generic Error Messages**: No information leakage
+8. **Generic Error Messages**: No information leakage to prevent enumeration attacks
+
+### S3 Storage Security
+9. **Server-Side Encryption**: AES256 encryption for all objects at rest
+10. **Presigned URLs**: Time-limited URLs (1-hour default, max 7 days) for controlled access
+11. **Path Traversal Protection**: Input validation prevents `..` patterns in bucket/path
+12. **Path Normalization**: Automatic trimming and validation of all S3 keys
+13. **Key Length Validation**: Enforces S3's 1024-byte limit to prevent DOS
+14. **Bucket Name Validation**: Strict AWS naming conventions enforced at config level
+15. **Endpoint URL Validation**: Protocol validation for S3-compatible endpoints
+16. **Error Context Isolation**: Sensitive S3 details (credentials, internal paths) never exposed to clients
+17. **IAM Best Practices**: Single-bucket policy simplifies least-privilege access control
 
 ## Troubleshooting
 
@@ -379,6 +429,15 @@ curl "http://localhost:8000/api/v1/images/batch?image_ids=$IMAGE_IDS"
 - **Easy migration**: Change one line in .env to switch backends
 - **Testing**: Easy to mock for unit tests
 - **Future-proof**: Can add GCS, Azure Blob, or custom backends
+
+### Why Single-Bucket S3 Architecture?
+- **Industry standard**: Avoids bucket proliferation (AWS recommends < 100 buckets per account)
+- **Cost efficient**: Bucket operations and management overhead minimized
+- **Simplified IAM**: One bucket policy instead of thousands
+- **Better performance**: S3 is optimized for many objects in few buckets, not many buckets
+- **Scalability**: Supports unlimited objects within a single bucket
+- **Logical isolation**: Authorization enforced via prefix-based access patterns
+- **Transparent migration**: Application code unchanged, only storage layer refactored
 
 ### Why SQLite Instead of PostgreSQL?
 - **Embedded**: No separate database service required

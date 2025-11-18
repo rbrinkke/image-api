@@ -91,7 +91,9 @@ import sys
 payload = {
     'sub': '$user_id',
     'org_id': '$org_id',
-    'email': '${user_id}@example.com'
+    'email': '${user_id}@example.com',
+    'aud': 'image-api',
+    'iss': 'http://auth-api:8000'
 }
 
 token = jwt.encode(payload, '$JWT_SECRET', algorithm='HS256')

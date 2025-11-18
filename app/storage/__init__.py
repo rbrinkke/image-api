@@ -24,7 +24,11 @@ def get_storage() -> StorageBackend:
     elif settings.STORAGE_BACKEND == "s3":
         # Lazy import to avoid requiring aioboto3 when using local storage
         from .s3 import S3StorageBackend
-        return S3StorageBackend(settings.AWS_REGION)
+        return S3StorageBackend(
+            region=settings.AWS_REGION,
+            bucket_name=settings.AWS_S3_BUCKET_NAME,
+            endpoint_url=settings.AWS_ENDPOINT_URL
+        )
     else:
         raise ValueError(f"Unknown storage backend: {settings.STORAGE_BACKEND}")
 
