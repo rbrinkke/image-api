@@ -11,14 +11,14 @@ Benefits:
 import json
 from uuid import uuid4
 from datetime import datetime
-from typing import Dict, Any, BinaryIO
+from typing import Dict, Any
 from fastapi import UploadFile
 
 from app.db.sqlite import ProcessorDB
 from app.storage.protocol import StorageBackend
 from app.tasks.celery_app import process_image_task
 from app.core.logging_config import get_logger
-from app.core.errors import ServiceError, ErrorCode, processing_error
+from app.core.errors import ServiceError, ErrorCode, processing_error, not_found_error
 from app.core.config import settings
 
 logger = get_logger(__name__)
@@ -135,12 +135,17 @@ class ImageService:
         # 5. Storage Operation (Save to Staging)
         try:
             # Reset file pointer to beginning (safety measure)
-            await file.seek(0)
+            try:
+                await file.seek(0)
+            except Exception as seek_error:
+                # File stream might be closed or unseekable, log but continue
+                logger.warning("file_seek_failed", job_id=job_id, error=str(seek_error))
+
             await self.storage.save(file.file, bucket, staging_path)
             logger.debug("file_saved_to_staging", job_id=job_id, path=staging_path)
         except Exception as e:
-            # Critical: Job exists in DB but file not saved
-            # TODO: Consider marking job as 'failed' here for consistency
+            # CRITICAL RACE CONDITION FIX: Rollback database state
+            # Job exists in DB but file not saved - mark as failed to prevent zombie jobs
             logger.error(
                 "storage_save_failed",
                 job_id=job_id,
@@ -148,6 +153,24 @@ class ImageService:
                 path=staging_path,
                 error=str(e)
             )
+
+            # Rollback: Mark job as failed in database
+            try:
+                await self.db.update_job_status(
+                    job_id=job_id,
+                    status='failed',
+                    error=f"Storage save failed: {str(e)}"
+                )
+                logger.info("job_marked_failed_after_storage_error", job_id=job_id)
+            except Exception as rollback_error:
+                # Rollback failed - log critical error
+                logger.critical(
+                    "rollback_failed_after_storage_error",
+                    job_id=job_id,
+                    rollback_error=str(rollback_error),
+                    original_error=str(e)
+                )
+
             raise processing_error(
                 code=ErrorCode.STAGING_FAILED,
                 message="Could not save file to staging storage",
@@ -159,9 +182,38 @@ class ImageService:
             process_image_task.delay(job_id)
             logger.info("processing_task_queued", job_id=job_id)
         except Exception as e:
-            # Critical: Job and file exist, but not queued for processing
-            # Job will remain in 'pending' state indefinitely
+            # CRITICAL RACE CONDITION FIX: Rollback database state and cleanup file
+            # Job and file exist, but not queued for processing - would remain pending forever
             logger.error("celery_dispatch_failed", job_id=job_id, error=str(e))
+
+            # Rollback: Mark job as failed in database
+            try:
+                await self.db.update_job_status(
+                    job_id=job_id,
+                    status='failed',
+                    error=f"Task queue failed: {str(e)}"
+                )
+                logger.info("job_marked_failed_after_queue_error", job_id=job_id)
+            except Exception as rollback_error:
+                logger.critical(
+                    "rollback_failed_after_queue_error",
+                    job_id=job_id,
+                    rollback_error=str(rollback_error),
+                    original_error=str(e)
+                )
+
+            # Cleanup: Delete orphaned staging file
+            try:
+                await self.storage.delete(bucket, staging_path)
+                logger.info("staging_file_cleaned_up", job_id=job_id, path=staging_path)
+            except Exception as cleanup_error:
+                logger.warning(
+                    "staging_cleanup_failed",
+                    job_id=job_id,
+                    path=staging_path,
+                    error=str(cleanup_error)
+                )
+
             raise processing_error(
                 code=ErrorCode.TASK_QUEUE_FAILED,
                 message="Could not queue processing task",
@@ -187,14 +239,14 @@ class ImageService:
             Dict with job status and metadata
 
         Raises:
-            ServiceError: If job not found
+            ServiceError: If job not found (404 with JOB_NOT_FOUND code)
         """
         job = await self.db.get_job(job_id)
         if not job:
-            raise ServiceError(
-                status_code=404,
-                code=ErrorCode.JOB_CREATION_FAILED,  # Could use JOB_NOT_FOUND
-                message=f"Job not found: {job_id}"
+            raise not_found_error(
+                code=ErrorCode.JOB_NOT_FOUND,
+                message=f"Job not found: {job_id}",
+                details={"job_id": job_id}
             )
 
         return {

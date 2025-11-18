@@ -21,6 +21,7 @@ class ErrorCode(str, Enum):
     JOB_CREATION_FAILED = "JOB_001"
     STAGING_FAILED = "JOB_002"
     TASK_QUEUE_FAILED = "JOB_003"
+    JOB_NOT_FOUND = "JOB_004"
 
     # Auth errors (AUTH_xxx)
     AUTH_INVALID_TOKEN = "AUTH_001"
@@ -91,3 +92,8 @@ def processing_error(code: ErrorCode, message: str, details: Optional[Dict[str, 
 def auth_error(code: ErrorCode, message: str, details: Optional[Dict[str, Any]] = None) -> ServiceError:
     """Create an authentication-related error (403 Forbidden)."""
     return ServiceError(status.HTTP_403_FORBIDDEN, code, message, details)
+
+
+def not_found_error(code: ErrorCode, message: str, details: Optional[Dict[str, Any]] = None) -> ServiceError:
+    """Create a not-found error (404 Not Found)."""
+    return ServiceError(status.HTTP_404_NOT_FOUND, code, message, details)
