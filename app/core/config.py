@@ -1,5 +1,7 @@
 """Application configuration using Pydantic Settings."""
 
+import re
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 from typing import List, Optional
 
@@ -98,6 +100,70 @@ class Settings(BaseSettings):
     CELERY_TASK_ACKS_LATE: bool = True  # Acknowledge after completion
     CELERY_WORKER_PREFETCH_MULTIPLIER: int = 1  # One task at a time
     CELERY_WORKER_MAX_TASKS_PER_CHILD: int = 50  # Restart for memory cleanup
+
+    @field_validator('AWS_S3_BUCKET_NAME')
+    @classmethod
+    def validate_s3_bucket_name(cls, v: str) -> str:
+        """Validate S3 bucket name follows AWS naming conventions.
+
+        Rules:
+        - 3-63 characters long
+        - Lowercase letters, numbers, hyphens, and dots only
+        - Must start and end with a letter or number
+        - No consecutive dots
+        - Not formatted as an IP address
+        """
+        if not v:  # Allow empty for local storage backend
+            return v
+
+        if not 3 <= len(v) <= 63:
+            raise ValueError(f"S3 bucket name must be 3-63 characters long, got {len(v)}")
+
+        # Check for valid characters and format
+        if not re.match(r'^[a-z0-9][a-z0-9.-]*[a-z0-9]$', v):
+            raise ValueError(
+                f"S3 bucket name '{v}' must start/end with letter or number, "
+                "and contain only lowercase letters, numbers, hyphens, and dots"
+            )
+
+        # Check for consecutive dots
+        if '..' in v:
+            raise ValueError("S3 bucket name cannot contain consecutive dots")
+
+        # Check if it looks like an IP address
+        if re.match(r'^\d+\.\d+\.\d+\.\d+$', v):
+            raise ValueError("S3 bucket name cannot be formatted as an IP address")
+
+        return v
+
+    @field_validator('AWS_ENDPOINT_URL')
+    @classmethod
+    def validate_endpoint_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate AWS endpoint URL format if provided."""
+        if v is None or v == "":
+            return None
+
+        # Basic URL validation
+        if not re.match(r'^https?://.+', v):
+            raise ValueError(
+                f"AWS_ENDPOINT_URL must start with http:// or https://, got '{v}'"
+            )
+
+        return v
+
+    @model_validator(mode='after')
+    def validate_s3_configuration(self):
+        """Ensure S3 backend has required configuration."""
+        if self.STORAGE_BACKEND == "s3":
+            if not self.AWS_S3_BUCKET_NAME:
+                raise ValueError(
+                    "AWS_S3_BUCKET_NAME must be set when STORAGE_BACKEND=s3"
+                )
+            if not self.AWS_REGION:
+                raise ValueError(
+                    "AWS_REGION must be set when STORAGE_BACKEND=s3"
+                )
+        return self
 
     @property
     def is_debug_mode(self) -> bool:
