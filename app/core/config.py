@@ -1,9 +1,35 @@
 """Application configuration using Pydantic Settings."""
 
 import re
-from pydantic import field_validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from typing import List, Optional
+
+
+class ImageSizesConfig(BaseModel):
+    """Type-safe configuration for image variant sizes.
+
+    Each field represents a variant name and its maximum dimension in pixels.
+    This prevents runtime errors from misconfigured IMAGE_SIZES in environment.
+
+    Example:
+        thumbnail=150 means the thumbnail variant will be max 150x150px
+        while maintaining the original aspect ratio.
+    """
+    thumbnail: int = 150
+    medium: int = 600
+    large: int = 1200
+    original: int = 4096
+
+    @field_validator('thumbnail', 'medium', 'large', 'original')
+    @classmethod
+    def validate_dimension(cls, v: int) -> int:
+        """Ensure dimensions are positive and reasonable."""
+        if v <= 0:
+            raise ValueError(f"Image dimension must be positive, got {v}")
+        if v > 8192:
+            raise ValueError(f"Image dimension too large (max 8192), got {v}")
+        return v
 
 
 class Settings(BaseSettings):
@@ -82,12 +108,8 @@ class Settings(BaseSettings):
     ALLOWED_MIME_TYPES: List[str] = ["image/jpeg", "image/png", "image/webp"]
 
     # Image Processing Configuration
-    IMAGE_SIZES: dict = {
-        "thumbnail": 150,
-        "medium": 600,
-        "large": 1200,
-        "original": 4096
-    }
+    # Type-safe image variant configuration using nested Pydantic model
+    IMAGE_SIZES: ImageSizesConfig = ImageSizesConfig()
     WEBP_QUALITY: int = 85
 
     # Celery Worker Configuration

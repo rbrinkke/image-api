@@ -21,6 +21,7 @@ Architecture:
 import logging
 import logging.config
 import sys
+from contextvars import ContextVar
 from typing import Any, Dict, Optional
 import structlog
 from structlog.types import EventDict, Processor
@@ -30,31 +31,45 @@ from pythonjsonlogger import jsonlogger
 # Trace ID context variable (set by middleware)
 # Note: We use "trace_id" for observability stack compatibility
 # while maintaining "correlation_id" as an alias for backward compatibility
-_trace_id_context: Optional[str] = None
+#
+# IMPORTANT: Uses contextvars for thread-safe and async-safe context management.
+# Each asyncio Task has its own isolated context, preventing race conditions
+# in concurrent request handling.
+_trace_id_context: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
 
 
 def set_trace_id(trace_id: str) -> None:
     """Set the trace ID for the current request context.
 
     Called by middleware to inject request tracking ID.
+    This is task-safe and will not interfere with concurrent requests.
     """
-    global _trace_id_context
-    _trace_id_context = trace_id
+    _trace_id_context.set(trace_id)
 
 
 def get_trace_id() -> Optional[str]:
-    """Get the current trace ID.
+    """Get the current trace ID from the current context.
 
     Returns:
         Trace ID if set, None otherwise
+
+    Note:
+        This is safe to call from any async task or thread.
+        Each context maintains its own isolated trace ID.
     """
-    return _trace_id_context
+    return _trace_id_context.get()
 
 
 def clear_trace_id() -> None:
-    """Clear the trace ID after request completes."""
-    global _trace_id_context
-    _trace_id_context = None
+    """Clear the trace ID for the current context.
+
+    Note:
+        With contextvars, this is typically not needed as contexts
+        are automatically cleaned up when tasks complete. However,
+        this method is maintained for backward compatibility and
+        explicit cleanup scenarios.
+    """
+    _trace_id_context.set(None)
 
 
 # Backward compatibility aliases

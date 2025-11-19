@@ -210,7 +210,8 @@ def process_image_task(self, job_id: str):
         processed_paths = {}
         variants_metadata = {}
 
-        for variant_name, max_dim in settings.IMAGE_SIZES.items():
+        # Convert Pydantic model to dict for iteration
+        for variant_name, max_dim in settings.IMAGE_SIZES.model_dump().items():
             logger.debug(
                 "variant_generation_started",
                 job_id=job_id,

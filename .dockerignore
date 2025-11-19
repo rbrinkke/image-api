@@ -1,0 +1,80 @@
+# Docker build context exclusions
+# Reduces build context size and prevents sensitive files from being copied
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.log
+tests/
+
+# Documentation
+*.md
+docs/
+README.md
+CHANGELOG.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Environment files (sensitive!)
+.env
+.env.*
+*.key
+*.pem
+*.crt
+secrets/
+
+# Data directories (should be volumes)
+/data/
+*.db
+*.sqlite
+
+# Development dependencies
+requirements-dev.txt
+
+# Bash scripts
+*.sh
+
+# Temporary files
+tmp/
+temp/
+*.tmp
