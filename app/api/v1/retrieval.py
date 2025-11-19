@@ -290,10 +290,10 @@ async def delete_image(
     Removes all processed files from storage.
     Database records are retained for audit trail.
 
-    **Authorization**: Requires bucket-specific delete access.
-    - Group buckets: Requires group membership
-    - User buckets: Owner only
-    - System buckets: All authenticated users
+    **Authorization**: RBAC + Ownership model
+    - Admin (image:admin permission): Can delete ANY image (bypass ownership)
+    - Owner (image:write permission): Can delete ONLY their own images
+    - Others: Denied with 403 Forbidden
 
     Args:
         request: HTTP request for auth context
@@ -307,33 +307,54 @@ async def delete_image(
     Raises:
         HTTPException: 404 if image not found
         HTTPException: 401 if not authenticated
-        HTTPException: 403 if permission denied
+        HTTPException: 403 if permission denied (not owner and not admin)
         HTTPException: 503 if authorization service unavailable
     """
-    # Get job first to determine bucket
+    # Step 1: Retrieve job to verify existence
     job = await db.get_job_by_image_id(image_id)
 
     if not job:
         logger.warning("image_deletion_not_found", image_id=image_id)
         raise HTTPException(status_code=404, detail="Image not found")
 
-    # Check bucket access authorization for delete operation
+    # Step 2: Check bucket access authorization (verifies group membership/bucket ownership)
     bucket = job["storage_bucket"]
     auth = await require_bucket_read_access(request, bucket)
 
     # Delete requires authentication (no public deletes)
     if auth is None:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=401,
             detail="Authentication required for deletion"
         )
 
+    # Step 3: CRITICAL - RBAC + Ownership Check
+    # Admin bypass: Users with image:admin can delete ANY image
+    is_admin = "image:admin" in auth.permissions
+    # Ownership check: User must be the owner of the image
+    is_owner = job.get("user_id") == auth.user_id
+
+    # Security logic: Admin can delete anything, Owner can delete their own, Others are denied
+    if not is_admin and not is_owner:
+        logger.warning(
+            "delete_denied_not_owner",
+            user_id=auth.user_id,
+            image_owner=job.get("user_id"),
+            image_id=image_id,
+            permissions=auth.permissions,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete your own images."
+        )
+
     logger.info(
-        "image_deletion_request",
+        "image_deletion_authorized",
         image_id=image_id,
         user_id=auth.user_id,
         org_id=auth.org_id,
         bucket=bucket,
+        role="admin" if is_admin else "owner"
     )
 
     deleted_count = 0
