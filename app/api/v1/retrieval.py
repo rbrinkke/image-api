@@ -403,6 +403,14 @@ async def delete_image(
 
     # Note: Database records kept for audit trail
     # In production, consider adding 'deleted' flag instead
+    
+    # Update: For strict ownership/deletion, we remove the record
+    try:
+        await db.delete_job(job["job_id"])
+        logger.info("job_record_deleted", job_id=job["job_id"])
+    except Exception as exc:
+        logger.error("job_deletion_failed", job_id=job["job_id"], error=str(exc))
+        # Continue to return success for file deletion, but log DB error
 
     logger.info(
         "image_deletion_completed",

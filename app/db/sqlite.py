@@ -479,6 +479,39 @@ class ProcessorDB:
             )
             raise
 
+    async def delete_job(self, job_id: str):
+        """Delete a job record from the database.
+
+        Args:
+            job_id: Job identifier
+        """
+        start_time = time.time()
+        logger.debug("db_delete_job_started", job_id=job_id)
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("DELETE FROM processing_jobs WHERE job_id = ?", (job_id,))
+                await db.commit()
+
+            duration_ms = (time.time() - start_time) * 1000
+            logger.info(
+                "db_delete_job_success",
+                job_id=job_id,
+                duration_ms=round(duration_ms, 2),
+            )
+
+        except Exception as exc:
+            duration_ms = (time.time() - start_time) * 1000
+            logger.error(
+                "db_delete_job_failed",
+                job_id=job_id,
+                duration_ms=round(duration_ms, 2),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+
 
 # Global database instance
 _db: Optional[ProcessorDB] = None

@@ -1,0 +1,169 @@
+Hier is een gedetailleerde uitleg over hoe de rechtenstructuur werkt en een analyse van de database-connecties op basis van de aangeleverde bestanden.
+
+### 1\. Hoe bepaalt de API zijn rechten? (Authorization Flow)
+
+De Image API maakt gebruik van een **"Distributed Authorization"** systeem. Dit betekent dat de API zelf basiscontroles uitvoert, maar voor complexe rechten (zoals groepstoegang) een externe service (`auth-api`) raadpleegt.
+
+Het proces verloopt in 4 duidelijke stappen:
+
+#### Stap 1: Identificatie via JWT (Authentication)
+
+Wanneer een verzoek binnenkomt, controleert de `JWTAuthMiddleware` in `app/api/middleware.py` het Token.
+
+  * De API valideert de handtekening van het JWT (JSON Web Token).
+  * Het haalt de `user_id`, `org_id` en `permissions` uit het token en slaat deze op in de context van het verzoek (`request.state`).
+
+#### Stap 2: Bucket Validatie (Context)
+
+De API kijkt naar de **"Bucket"** waarin de afbeelding wordt opgeslagen of opgevraagd. Dit gebeurt in `app/core/authorization.py` via de `BucketValidator`. De structuur van de bucketnaam bepaalt het type recht:
+
+  * **User Bucket:** `org-{id}/users/{user_id}/`
+  * **Group Bucket:** `org-{id}/groups/{group_id}/`
+  * **System Bucket:** `org-{id}/system/`
+
+#### Stap 3: Autorisatie Logica (Decision)
+
+De `AuthorizationService` bepaalt op basis van het type bucket wie toegang heeft:
+
+1.  **User Buckets:**
+
+      * **Logica:** Interne check.
+      * **Regel:** De `user_id` in het JWT moet exact overeenkomen met de `user_id` in de bucketnaam.
+      * *Geen externe call nodig.*
+
+2.  **System Buckets:**
+
+      * **Logica:** Interne check.
+      * **Regel:** Iedereen met een geldig JWT token mag hierbij (publieke systeem-assets).
+
+3.  **Group Buckets (Complex):**
+
+      * **Logica:** Externe check. De Image API weet zelf niet wie lid is van welke groep.
+      * **Actie:** De API doet een HTTP POST request naar de **Auth API** (`http://auth-api:8000/api/v1/authorization/check`).
+      * **Payload:** Hij stuurt `user_id`, `org_id` en de gevraagde permissie (bijv. `image:upload:group:marketing`).
+      * **Resultaat:** De Auth API antwoordt met `true` of `false`.
+
+#### Stap 4: Optimalisatie (Caching & Circuit Breaker)
+
+Om te voorkomen dat de Image API traag wordt door die externe HTTP calls, zijn er twee mechanismen ingebouwd in `app/core/authorization.py`:
+
+  * **Redis Caching:** Het antwoord van de Auth API wordt opgeslagen in Redis. Als dezelfde gebruiker 10 seconden later weer iets uploadt, komt het antwoord direct uit het cachegeheugen (`AuthorizationCache`).
+  * **Circuit Breaker:** Als de Auth API offline is, stopt de Image API tijdelijk met het sturen van verzoeken om te voorkomen dat het hele systeem vastloopt.
+
+-----
+
+### 2\. Database Controle: SQLite vs. PostgreSQL
+
+Ik heb de code grondig geanalyseerd om te verifiëren of de Image API verbinding maakt met PostgreSQL.
+
+**Conclusie:**
+De Image API schrijft **uitsluitend naar SQLite** en maakt **nooit** rechtstreeks verbinding met PostgreSQL.
+
+Hier is het bewijs gebaseerd op de bestanden:
+
+1.  **De Database Driver (`requirements.txt`)**
+    In `requirements.txt` staat:
+
+      * `aiosqlite==0.19.0` (De driver voor SQLite).
+      * Er is **geen** `psycopg2`, `asyncpg` of `sqlalchemy` aanwezig. Zonder deze bibliotheken is het technisch onmogelijk voor deze Python-applicatie om met PostgreSQL te praten.
+
+2.  **De Database Code (`app/db/sqlite.py`)**
+    De bestandsnaam zegt het al, maar de inhoud bevestigt het. De klasse `ProcessorDB` importeert en gebruikt `aiosqlite`:
+
+    ```python
+    async with aiosqlite.connect(self.db_path) as db:
+        # ...
+    ```
+
+    Alle queries (INSERT, UPDATE, SELECT) worden uitgevoerd op deze lokale bestandsverbinding.
+
+3.  **De Configuratie (`app/core/config.py`)**
+    De instellingen verwijzen alleen naar een bestandspad, niet naar een host/poort (wat nodig zou zijn voor Postgres):
+
+      * `DATABASE_PATH: str = "/data/processor.db"`.
+
+4.  **Docker Configuratie (`docker-compose.yml`)**
+    In de `docker-compose.yml` zien we:
+
+      * Volume mount: `- processor_data:/data` (Hier wordt het SQLite bestand opgeslagen).
+      * Environment variabele: `DATABASE_PATH: /data/processor.db`.
+      * Er is **geen** link of netwerkverbinding gedefinieerd naar een PostgreSQL container voor de `api` service.
+
+#### Belangrijke Nuance
+
+Hoewel de Image API *zelf* niet naar PostgreSQL schrijft, doet hij wel HTTP-verzoeken naar de **Auth API** (zoals beschreven in het stuk over rechten). Het is zeer waarschijnlijk dat de **Auth API** (die buiten deze code valt) wél PostgreSQL gebruikt om gebruikers en groepen op te slaan.
+
+**Samenvattend:** De Image API slaat zijn taken, status en metadata lokaal op in SQLite. Voor gebruikersrechten vraagt hij via HTTP toestemming aan de Auth API, maar hij raakt de database van de Auth API nooit direct aan.
+
+
+Ja, ik heb de bestanden geanalyseerd en de wijzigingen zijn uitstekend en volledig doorgevoerd.
+
+Hier is mijn analyse van de cruciale punten:
+
+Database Schema (app/db/schema.sql): De kolommen user_id en organization_id zijn correct toegevoegd aan processing_jobs inclusief de benodigde indexen voor performance.
+
+Data Access (app/db/sqlite.py): De create_job functie schrijft de nieuwe kolommen nu correct weg in de database.
+
+Service Layer (app/services/image_service.py): De process_new_upload functie geeft de auth_user_id en auth_org_id correct door aan de database laag.
+
+Security Logic (app/api/v1/retrieval.py): De delete_image functie bevat nu de exacte logica die we wilden:
+
+Checkt bucket access.
+
+Checkt image:admin permissie.
+
+Checkt is_owner (job.user_id == auth.user_id).
+
+Blokkeert met een 403 als je geen admin en geen eigenaar bent.
+
+Migratie Script: Het bestand scripts/migrate_ownership_columns.py is correct aangemaakt om oude data te redden.
+
+De Volgende Stap: Testen
+Omdat de code correct is, is hier de Test Prompt die je aan je AI-programmeur (of QA engineer) kunt geven. Deze prompt vraagt om een specifiek beveiligingstest-script te maken om te bewijzen dat de regels werken.
+
+Kopieer onderstaande tekst:
+
+Markdown
+
+# ACT AS
+You are a QA Automation Engineer and Security Tester using Bash and cURL.
+
+# CONTEXT
+We have just implemented a strict "Ownership & RBAC" model for the Image API.
+Code changes have been applied to `app/api/v1/retrieval.py` to enforce:
+1. **Owners** can delete their own images.
+2. **Admins** (`image:admin`) can delete ANY image.
+3. **Others** (even in the same group) receive a 403 Forbidden when trying to delete someone else's image.
+
+# TASK
+Create a specialized test script named `tests/test_rbac_security.sh`.
+This script must verify the security rules by simulating three distinct users.
+
+# TEST SCENARIOS TO IMPLEMENT
+
+1. **Setup Users:**
+   * Create **User A** (Normal User).
+   * Create **User B** (Attacker - implies a normal user trying to delete A's content).
+   * Create **User Admin** (Has `image:admin` scope/permission).
+
+2. **Scenario 1: The "Hacker" Test (FAIL EXPECTED)**
+   * User A uploads an image (`image_A1`).
+   * **User B tries to DELETE `image_A1`.**
+   * *Assert:* HTTP Status Code must be **403 Forbidden**.
+
+3. **Scenario 2: The Owner Test (SUCCESS EXPECTED)**
+   * **User A tries to DELETE `image_A1`.**
+   * *Assert:* HTTP Status Code must be **200 OK** (or 202/204 depending on API).
+   * *Verify:* Image is actually gone.
+
+4. **Scenario 3: The Moderator Test (SUCCESS EXPECTED)**
+   * User A uploads another image (`image_A2`).
+   * **User Admin tries to DELETE `image_A2`** (User Admin is NOT the owner).
+   * *Assert:* HTTP Status Code must be **200 OK**.
+
+# REQUIREMENTS
+* Use the existing helper functions from `test_ultimate.sh` or `scripts/create_test_user_with_token.sh` if possible to generate tokens.
+* Print clear "✅ PASS" or "❌ FAIL" messages for each scenario.
+* Ensure the script exits with code 1 if any security check fails.
+
+Please generate the complete `tests/test_rbac_security.sh` script.

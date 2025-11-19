@@ -41,7 +41,7 @@ services:
       STORAGE_BACKEND: local
 
       # Redis
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://image-processor-redis:6379/0
 
       # Security
       JWT_SECRET_KEY: your_very_long_secret_key_at_least_32_characters
@@ -103,7 +103,7 @@ services:
       STORAGE_BACKEND: local
 
       # Redis
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://image-processor-redis:6379/0
 
       # Processing
       WEBP_QUALITY: 85
@@ -131,7 +131,7 @@ services:
     ports:
       - "5555:5555"
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://image-processor-redis:6379/0
     depends_on:
       - redis
       - worker
