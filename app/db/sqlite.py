@@ -44,7 +44,9 @@ class ProcessorDB:
         image_id: str,
         storage_bucket: str,
         staging_path: str,
-        metadata: dict
+        metadata: dict,
+        user_id: str,
+        organization_id: str
     ) -> dict:
         """Create a new processing job.
 
@@ -54,6 +56,8 @@ class ProcessorDB:
             storage_bucket: Target storage bucket name
             staging_path: Temporary staging file path
             metadata: Job metadata dictionary
+            user_id: Owner user identifier (for RBAC)
+            organization_id: Organization identifier (for RBAC)
 
         Returns:
             dict: Created job information
@@ -74,9 +78,10 @@ class ProcessorDB:
                 await db.execute("""
                     INSERT INTO processing_jobs (
                         job_id, image_id, status, storage_bucket,
-                        staging_path, processing_metadata, created_at
-                    ) VALUES (?, ?, 'pending', ?, ?, ?, ?)
-                """, (job_id, image_id, storage_bucket, staging_path, json.dumps(metadata), now))
+                        staging_path, processing_metadata, created_at,
+                        user_id, organization_id
+                    ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                """, (job_id, image_id, storage_bucket, staging_path, json.dumps(metadata), now, user_id, organization_id))
 
                 # Log event
                 await db.execute("""

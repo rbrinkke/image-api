@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
     processed_paths TEXT,  -- JSON: {variant: path}
     processing_metadata TEXT,  -- JSON: metadata + generated info
 
+    -- Ownership information (for RBAC)
+    user_id TEXT,
+    organization_id TEXT,
+
     -- Retry mechanism
     attempt_count INTEGER DEFAULT 0,
     max_retries INTEGER DEFAULT 3,
@@ -28,6 +32,8 @@ CREATE TABLE IF NOT EXISTS processing_jobs (
 -- Indexes for efficient querying
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON processing_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_image ON processing_jobs(image_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON processing_jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_org_id ON processing_jobs(organization_id);
 
 -- Image Upload Events Table
 -- Audit trail for all image-related events

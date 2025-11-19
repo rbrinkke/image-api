@@ -121,7 +121,9 @@ class ImageService:
                 image_id=image_id,
                 storage_bucket=bucket,
                 staging_path=staging_path,
-                metadata=processing_metadata
+                metadata=processing_metadata,
+                user_id=auth_user_id,
+                organization_id=auth_org_id
             )
             logger.debug("job_record_created", job_id=job_id)
         except Exception as e:
