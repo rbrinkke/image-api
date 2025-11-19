@@ -58,6 +58,9 @@ htmlcov/
 *.sqlite
 *.sqlite3
 
+# Test Images (keep local only)
+test_images/
+
 # Logs
 *.log
 logs/
