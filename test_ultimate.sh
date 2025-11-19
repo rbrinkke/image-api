@@ -199,6 +199,18 @@ assert_upload_http_status() {
 # ═══════════════════════════════════════════════════════════════════════════
 
 generate_test_images() {
+    # Check if test images already exist
+    if [ -f "test_images/small_square_jpeg.jpeg" ] && \
+       [ -f "test_images/medium_square_png.png" ] && \
+       [ -f "test_images/large_landscape_jpeg.jpeg" ] && \
+       [ -f "test_images/webp_test.webp" ] && \
+       [ -f "test_images/oversized.jpeg" ] && \
+       [ -f "test_images/fake.txt" ]; then
+        local file_count=$(ls test_images/ | wc -l)
+        log_success "Test images already exist ($file_count files) - skipping generation"
+        return 0
+    fi
+
     log_info "Generating test images via Docker container..."
 
     mkdir -p test_images
