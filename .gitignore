@@ -61,6 +61,9 @@ htmlcov/
 # Test Images (keep local only)
 test_images/
 
+# Git bundles (backups)
+*.bundle
+
 # Logs
 *.log
 logs/
