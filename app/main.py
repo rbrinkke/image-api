@@ -10,7 +10,8 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging, get_logger
-from app.db.sqlite import get_db
+from app.db.session import engine
+from app.db.base import Base
 from app.api.v1 import upload, retrieval, health, dashboard, metrics
 from app.api.middleware import (
     RequestLoggingMiddleware,
@@ -52,9 +53,11 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize database schema
-    db = get_db()
-    await db.init_schema()
-    logger.info("database_initialized", database_path=settings.DATABASE_PATH)
+    # NOTE: In production, use Alembic migrations instead of create_all
+    if settings.is_debug_mode or settings.ENVIRONMENT == "development":
+         async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            logger.info("database_initialized", database_path=settings.DATABASE_PATH)
 
     # OAuth 2.0 configuration
     logger.info(
@@ -69,6 +72,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown - cleanup resources
     logger.info("application_shutdown_initiated")
+    await engine.dispose()
     logger.info("application_shutdown", graceful=True)
 
 

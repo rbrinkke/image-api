@@ -7,7 +7,7 @@ Clean Architecture Pattern:
 - Dependencies inject required services and validate auth/rate limits
 """
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, status
+from fastapi import APIRouter, UploadFile, File, Form, Depends, status, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Optional
 
@@ -17,10 +17,11 @@ from app.api.dependencies import (
     require_bucket_access,
     check_rate_limit,
     get_image_service,
+    get_processor_service,
     AuthContext
 )
 from app.services.image_service import ImageService
-from app.db.sqlite import get_db
+from app.services.processor_service import ProcessorService
 from app.core.config import settings
 from app.core.logging_config import get_logger
 
@@ -132,14 +133,14 @@ async def upload_image(
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(job_id: str, db=Depends(get_db)):
+async def get_job_status(job_id: str, service: ProcessorService = Depends(get_processor_service)):
     """Get processing job status.
 
     Poll this endpoint to check if processing is complete.
 
     Args:
         job_id: Job identifier from upload response
-        db: Database instance
+        service: ProcessorService instance
 
     Returns:
         dict: Job status with job_id, image_id, status, timestamps
@@ -149,7 +150,7 @@ async def get_job_status(job_id: str, db=Depends(get_db)):
     """
     logger.debug("job_status_query", job_id=job_id)
 
-    job = await db.get_job(job_id)
+    job = await service.get_job(job_id)
 
     if not job:
         logger.warning("job_status_not_found", job_id=job_id)
@@ -174,7 +175,7 @@ async def get_job_status(job_id: str, db=Depends(get_db)):
 
 
 @router.get("/jobs/{job_id}/result")
-async def get_job_result(job_id: str, db=Depends(get_db)):
+async def get_job_result(job_id: str, service: ProcessorService = Depends(get_processor_service)):
     """Get processed image results.
 
     Only returns successfully if job status is 'completed'.
@@ -182,7 +183,7 @@ async def get_job_result(job_id: str, db=Depends(get_db)):
 
     Args:
         job_id: Job identifier
-        db: Database instance
+        service: ProcessorService instance
 
     Returns:
         dict: Complete result with URLs, metadata, dominant color
@@ -193,7 +194,7 @@ async def get_job_result(job_id: str, db=Depends(get_db)):
     """
     logger.debug("job_result_query", job_id=job_id)
 
-    job = await db.get_job(job_id)
+    job = await service.get_job(job_id)
 
     if not job:
         logger.warning("job_result_not_found", job_id=job_id)

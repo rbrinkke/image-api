@@ -5,7 +5,8 @@ from fastapi.responses import FileResponse, RedirectResponse
 from typing import Literal, Optional
 from enum import Enum
 
-from app.db.sqlite import get_db
+from app.services.processor_service import ProcessorService
+from app.api.dependencies import get_processor_service
 from app.storage import get_storage
 from app.core.logging_config import get_logger
 from app.api.dependencies import require_permission, require_bucket_read_access, AuthContext
@@ -28,7 +29,7 @@ async def get_image_info(
     request: Request,
     image_id: str,
     size: ImageSize = Query(ImageSize.medium),
-    db=Depends(get_db),
+    service: ProcessorService = Depends(get_processor_service),
     storage=Depends(get_storage)
 ):
     """Get image URL and metadata by image_id.
@@ -42,7 +43,7 @@ async def get_image_info(
         request: HTTP request for auth context
         image_id: Image identifier
         size: Desired size variant
-        db: Database instance
+        service: ProcessorService instance
         storage: Storage backend
 
     Returns:
@@ -59,7 +60,7 @@ async def get_image_info(
         size=size.value,
     )
 
-    job = await db.get_job_by_image_id(image_id)
+    job = await service.get_job_by_image_id(image_id)
 
     if not job:
         logger.warning("image_not_found", image_id=image_id)
@@ -77,7 +78,7 @@ async def get_image_info(
     )
 
     paths = job["processed_paths"]
-    if size.value not in paths:
+    if not paths or size.value not in paths:
         logger.warning(
             "image_size_not_available",
             image_id=image_id,
@@ -103,8 +104,8 @@ async def get_image_info(
         "url": url,
         "size": size.value,
         "metadata": {
-            "dominant_color": metadata.get("dominant_color"),
-            "dimensions": metadata.get("variants", {}).get(size.value, {})
+            "dominant_color": metadata.get("dominant_color") if metadata else None,
+            "dimensions": metadata.get("variants", {}).get(size.value, {}) if metadata else {}
         }
     }
 
@@ -113,7 +114,7 @@ async def get_image_info(
 async def get_all_image_sizes(
     request: Request,
     image_id: str,
-    db=Depends(get_db),
+    service: ProcessorService = Depends(get_processor_service),
     storage=Depends(get_storage)
 ):
     """Get all size variants for an image.
@@ -126,7 +127,7 @@ async def get_all_image_sizes(
     Args:
         request: HTTP request for auth context
         image_id: Image identifier
-        db: Database instance
+        service: ProcessorService instance
         storage: Storage backend
 
     Returns:
@@ -139,7 +140,7 @@ async def get_all_image_sizes(
     """
     logger.debug("all_sizes_request", image_id=image_id)
 
-    job = await db.get_job_by_image_id(image_id)
+    job = await service.get_job_by_image_id(image_id)
 
     if not job:
         logger.warning("all_sizes_not_found", image_id=image_id)
@@ -156,7 +157,7 @@ async def get_all_image_sizes(
         authenticated=auth is not None,
     )
 
-    paths = job["processed_paths"]
+    paths = job["processed_paths"] or {}
 
     # Generate URLs for all variants asynchronously
     urls = {}
@@ -182,7 +183,7 @@ async def serve_image_direct(
     request: Request,
     image_id: str,
     size: ImageSize = Query(ImageSize.medium),
-    db=Depends(get_db),
+    service: ProcessorService = Depends(get_processor_service),
     storage=Depends(get_storage)
 ):
     """Direct image file serving or redirect to presigned URL.
@@ -199,7 +200,7 @@ async def serve_image_direct(
         request: HTTP request for auth context
         image_id: Image identifier
         size: Desired size variant
-        db: Database instance
+        service: ProcessorService instance
         storage: Storage backend
 
     Returns:
@@ -216,7 +217,7 @@ async def serve_image_direct(
         size=size.value,
     )
 
-    job = await db.get_job_by_image_id(image_id)
+    job = await service.get_job_by_image_id(image_id)
 
     if not job:
         logger.warning(
@@ -238,12 +239,12 @@ async def serve_image_direct(
     )
 
     paths = job["processed_paths"]
-    if size.value not in paths:
+    if not paths or size.value not in paths:
         logger.warning(
             "direct_image_size_not_available",
             image_id=image_id,
             size=size.value,
-            available_sizes=list(paths.keys()),
+            available_sizes=list(paths.keys()) if paths else [],
         )
         raise HTTPException(status_code=404, detail=f"Size '{size.value}' not available")
 
@@ -282,7 +283,7 @@ async def serve_image_direct(
 async def delete_image(
     request: Request,
     image_id: str,
-    db=Depends(get_db),
+    service: ProcessorService = Depends(get_processor_service),
     storage=Depends(get_storage)
 ):
     """Delete image and all its variants.
@@ -298,7 +299,7 @@ async def delete_image(
     Args:
         request: HTTP request for auth context
         image_id: Image identifier
-        db: Database instance
+        service: ProcessorService instance
         storage: Storage backend
 
     Returns:
@@ -311,7 +312,7 @@ async def delete_image(
         HTTPException: 503 if authorization service unavailable
     """
     # Step 1: Retrieve job to verify existence
-    job = await db.get_job_by_image_id(image_id)
+    job = await service.get_job_by_image_id(image_id)
 
     if not job:
         logger.warning("image_deletion_not_found", image_id=image_id)
@@ -406,7 +407,7 @@ async def delete_image(
     
     # Update: For strict ownership/deletion, we remove the record
     try:
-        await db.delete_job(job["job_id"])
+        await service.delete_job(job["job_id"])
         logger.info("job_record_deleted", job_id=job["job_id"])
     except Exception as exc:
         logger.error("job_deletion_failed", job_id=job["job_id"], error=str(exc))
@@ -434,7 +435,7 @@ async def get_images_batch(
     request: Request,
     image_ids: str = Query(..., description="Comma-separated image UUIDs"),
     size: ImageSize = Query(ImageSize.medium),
-    db=Depends(get_db),
+    service: ProcessorService = Depends(get_processor_service),
     storage=Depends(get_storage)
 ):
     """Batch retrieval for multiple images.
@@ -450,7 +451,7 @@ async def get_images_batch(
         request: HTTP request for auth context
         image_ids: Comma-separated list of image IDs
         size: Desired size variant for all images
-        db: Database instance
+        service: ProcessorService instance
         storage: Storage backend
 
     Returns:
@@ -484,8 +485,8 @@ async def get_images_batch(
 
     for image_id in ids:
         try:
-            job = await db.get_job_by_image_id(image_id)
-            if job and job["processed_paths"].get(size.value):
+            job = await service.get_job_by_image_id(image_id)
+            if job and job["processed_paths"] and job["processed_paths"].get(size.value):
                 bucket = job["storage_bucket"]
 
                 # Check bucket access for this image
@@ -509,7 +510,7 @@ async def get_images_batch(
                     "image_id": image_id,
                     "url": url,
                     "size": size.value,
-                    "dominant_color": job["processing_metadata"].get("dominant_color")
+                    "dominant_color": job["processing_metadata"].get("dominant_color") if job["processing_metadata"] else None
                 })
             else:
                 failed_ids.append(image_id)

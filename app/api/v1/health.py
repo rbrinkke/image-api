@@ -1,10 +1,12 @@
 """Health and monitoring API endpoints."""
 
 from fastapi import APIRouter, Depends
-from datetime import datetime
-import aiosqlite
+from datetime import datetime, timezone, timedelta
+from sqlalchemy import select, func, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.sqlite import get_db
+from app.db.session import get_session
+from app.db.models import ProcessingJob
 from app.core.config import settings
 from app.core.logging_config import get_logger
 from app.tasks.celery_app import celery_app
@@ -28,12 +30,12 @@ async def health_check():
         "status": "healthy",
         "service": settings.SERVICE_NAME,
         "version": settings.VERSION,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 
 @router.get("/stats")
-async def get_statistics(db=Depends(get_db)):
+async def get_statistics(session: AsyncSession = Depends(get_session)):
     """Get detailed processing statistics.
 
     Provides insights into:
@@ -43,47 +45,68 @@ async def get_statistics(db=Depends(get_db)):
     - Celery worker status
 
     Args:
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: Comprehensive statistics
     """
-    async with aiosqlite.connect(db.db_path) as conn:
-        # Status breakdown
-        async with conn.execute("""
-            SELECT status, COUNT(*) as count
-            FROM processing_jobs
-            GROUP BY status
-        """) as cursor:
-            status_counts = {row[0]: row[1] for row in await cursor.fetchall()}
+    # Status breakdown
+    stmt = select(ProcessingJob.status, func.count(ProcessingJob.job_id)).group_by(ProcessingJob.status)
+    result = await session.execute(stmt)
+    status_counts = {row[0]: row[1] for row in result.all()}
 
-        # Performance metrics (last 24 hours)
-        async with conn.execute("""
-            SELECT
-                COUNT(*) as total,
-                AVG(CAST((julianday(completed_at) - julianday(created_at)) * 86400 AS REAL)) as avg_seconds
-            FROM processing_jobs
-            WHERE status = 'completed'
-            AND created_at > datetime('now', '-24 hours')
-        """) as cursor:
-            row = await cursor.fetchone()
-            performance = {
-                "completed_24h": row[0] or 0,
-                "avg_processing_time_seconds": round(row[1], 2) if row[1] else None
-            }
+    # Performance metrics (last 24 hours)
+    # SQLAlchemy doesn't have a generic 'julianday' function for all dialects.
+    # We should use python calculation or dialect specific sql.
+    # Since we use asyncpg (Postgres) or aiosqlite (SQLite), we need to be careful.
+    # However, we can fetch the records and calculate in python if dataset is small,
+    # or write compatible SQL.
 
-        # Storage statistics
-        async with conn.execute("""
-            SELECT
-                COUNT(DISTINCT image_id) as total_images,
-                COUNT(*) as total_jobs
-            FROM processing_jobs
-        """) as cursor:
-            row = await cursor.fetchone()
-            storage = {
-                "total_images": row[0],
-                "total_jobs": row[1]
-            }
+    # For SQLite: julianday(completed_at) - julianday(created_at)
+    # For Postgres: extract(epoch from (completed_at - created_at))
+
+    # Let's try to be generic by fetching completed jobs in last 24h
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    stmt = select(ProcessingJob).where(
+        ProcessingJob.status == 'completed',
+        ProcessingJob.created_at > cutoff
+    )
+    result = await session.execute(stmt)
+    jobs = result.scalars().all()
+
+    total_completed_24h = len(jobs)
+    total_duration = 0.0
+
+    for job in jobs:
+        if job.completed_at and job.created_at:
+            # ensure timezones match or are aware
+            start = job.created_at
+            end = job.completed_at
+            if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
+            if end.tzinfo is None: end = end.replace(tzinfo=timezone.utc)
+
+            total_duration += (end - start).total_seconds()
+
+    avg_seconds = round(total_duration / total_completed_24h, 2) if total_completed_24h > 0 else None
+
+    performance = {
+        "completed_24h": total_completed_24h,
+        "avg_processing_time_seconds": avg_seconds
+    }
+
+    # Storage statistics
+    # Count unique images
+    stmt_images = select(func.count(func.distinct(ProcessingJob.image_id)))
+    total_images = (await session.execute(stmt_images)).scalar() or 0
+
+    stmt_jobs = select(func.count(ProcessingJob.job_id))
+    total_jobs = (await session.execute(stmt_jobs)).scalar() or 0
+
+    storage = {
+        "total_images": total_images,
+        "total_jobs": total_jobs
+    }
 
     # Celery queue health
     try:
@@ -95,7 +118,7 @@ async def get_statistics(db=Depends(get_db)):
             "active_workers": len(active_tasks) if active_tasks else 0,
             "active_tasks": sum(len(tasks) for tasks in active_tasks.values()) if active_tasks else 0
         }
-    except (TimeoutError, OSError, ConnectionError) as e:
+    except (TimeoutError, OSError, ConnectionError, Exception) as e:
         # Specific handling for Celery connection failures
         logger.warning(
             "celery_inspection_failed",
@@ -114,45 +137,43 @@ async def get_statistics(db=Depends(get_db)):
         "performance_24h": performance,
         "storage": storage,
         "celery": celery_stats,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 
 @router.get("/failed")
-async def get_failed_jobs(limit: int = 50, db=Depends(get_db)):
+async def get_failed_jobs(limit: int = 50, session: AsyncSession = Depends(get_session)):
     """Get recent failed jobs for debugging.
 
     Args:
         limit: Maximum number of failed jobs to return (default: 50)
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: List of failed jobs with error details
     """
-    async with aiosqlite.connect(db.db_path) as conn:
-        conn.row_factory = aiosqlite.Row
-        async with conn.execute("""
-            SELECT job_id, image_id, last_error, attempt_count, created_at, completed_at
-            FROM processing_jobs
-            WHERE status = 'failed'
-            ORDER BY completed_at DESC
-            LIMIT ?
-        """, (limit,)) as cursor:
-            rows = await cursor.fetchall()
+    stmt = select(ProcessingJob).where(
+        ProcessingJob.status == 'failed'
+    ).order_by(
+        ProcessingJob.completed_at.desc()
+    ).limit(limit)
+
+    result = await session.execute(stmt)
+    jobs = result.scalars().all()
 
     return {
         "failed_jobs": [
             {
-                "job_id": row["job_id"],
-                "image_id": row["image_id"],
-                "error": row["last_error"],
-                "attempts": row["attempt_count"],
-                "created_at": row["created_at"],
-                "failed_at": row["completed_at"]
+                "job_id": job.job_id,
+                "image_id": job.image_id,
+                "error": job.last_error,
+                "attempts": job.attempt_count,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "failed_at": job.completed_at.isoformat() if job.completed_at else None
             }
-            for row in rows
+            for job in jobs
         ],
-        "total": len(rows)
+        "total": len(jobs)
     }
 
 
@@ -223,7 +244,5 @@ async def authorization_health_check():
             "status": "healthy" if auth_api_healthy else "down",
             "error": auth_api_error,
         },
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
-
-# Updated: 2025-11-18 22:01 UTC - Production-ready code

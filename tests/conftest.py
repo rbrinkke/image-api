@@ -19,12 +19,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 # Import the FastAPI app
 from app.main import app
 from app.core.config import settings
-from app.db.sqlite import ProcessorDB
-from app.storage.local import LocalStorage
+from app.db.base import Base
+from app.db.session import get_session
+from app.storage.local import LocalStorageBackend
+from app.api.dependencies import get_processor_service
 
 
 # ============================================================================
@@ -57,6 +60,13 @@ def test_env(tmp_path: Path) -> dict:
     test_storage_path = tmp_path / "storage"
     test_storage_path.mkdir(parents=True, exist_ok=True)
 
+    # Update settings for test
+    settings.DATABASE_PATH = str(test_db_path)
+    settings.STORAGE_PATH = str(test_storage_path)
+    # Ensure DATABASE_URL is not set to some other value if we rely on path
+    if hasattr(settings, 'DATABASE_URL'):
+        delattr(settings, 'DATABASE_URL')
+
     return {
         "db_path": str(test_db_path),
         "storage_path": str(test_storage_path),
@@ -69,16 +79,29 @@ def test_env(tmp_path: Path) -> dict:
 # ============================================================================
 
 @pytest.fixture
-async def test_db(test_env: dict) -> AsyncGenerator[ProcessorDB, None]:
-    """Create a test database instance with schema initialized.
+async def test_db_session(test_env: dict) -> AsyncGenerator[AsyncSession, None]:
+    """Create a test database session with schema initialized.
 
-    Yields:
-        ProcessorDB: Test database instance
+    This creates a fresh database for each test.
     """
-    db = ProcessorDB(test_env["db_path"])
-    await db.init_schema()
-    yield db
-    # Cleanup happens automatically when test_env is torn down
+    database_url = f"sqlite+aiosqlite:///{test_env['db_path']}"
+    engine = create_async_engine(
+        database_url,
+        connect_args={"check_same_thread": False}
+    )
+
+    # Create tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async with SessionLocal() as session:
+        yield session
+
+    await engine.dispose()
 
 
 # ============================================================================
@@ -86,13 +109,13 @@ async def test_db(test_env: dict) -> AsyncGenerator[ProcessorDB, None]:
 # ============================================================================
 
 @pytest.fixture
-def test_storage(test_env: dict) -> LocalStorage:
+def test_storage(test_env: dict) -> LocalStorageBackend:
     """Create a test storage instance with temporary directory.
 
     Returns:
-        LocalStorage: Test storage instance
+        LocalStorageBackend: Test storage instance
     """
-    return LocalStorage(base_path=test_env["storage_path"])
+    return LocalStorageBackend(base_path=test_env["storage_path"])
 
 
 # ============================================================================
@@ -100,7 +123,7 @@ def test_storage(test_env: dict) -> LocalStorage:
 # ============================================================================
 
 @pytest.fixture
-def client() -> TestClient:
+def client(test_db_session) -> TestClient:
     """Create a synchronous test client for the FastAPI app.
 
     Use this for simple, synchronous tests.
@@ -108,11 +131,20 @@ def client() -> TestClient:
     Returns:
         TestClient: Synchronous test client
     """
-    return TestClient(app)
+    # Override dependency
+    async def override_get_session():
+        yield test_db_session
+
+    app.dependency_overrides[get_session] = override_get_session
+
+    with TestClient(app) as c:
+        yield c
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
-async def async_client() -> AsyncGenerator[AsyncClient, None]:
+async def async_client(test_db_session) -> AsyncGenerator[AsyncClient, None]:
     """Create an asynchronous test client for the FastAPI app.
 
     Use this for testing async endpoints and concurrent requests.
@@ -120,8 +152,18 @@ async def async_client() -> AsyncGenerator[AsyncClient, None]:
     Yields:
         AsyncClient: Asynchronous test client
     """
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    # Override dependency
+    async def override_get_session():
+        yield test_db_session
+
+    app.dependency_overrides[get_session] = override_get_session
+
+    from httpx import ASGITransport
+    # AsyncClient(app=...) is deprecated. Use AsyncClient(transport=ASGITransport(app=...))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
+
+    app.dependency_overrides.clear()
 
 
 # ============================================================================

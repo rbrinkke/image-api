@@ -4,6 +4,7 @@ import re
 from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from typing import List, Optional
+import os
 
 
 class ImageSizesConfig(BaseModel):
@@ -46,11 +47,12 @@ class Settings(BaseSettings):
     DEBUG: bool = False      # Enable debug mode features
 
     # Database
-    DATABASE_PATH: str = "/data/processor.db"
+    # Use a local file path relative to the project root for development default
+    DATABASE_PATH: str = os.path.join(os.getcwd(), "processor.db")
 
     # Storage Backend Configuration
     STORAGE_BACKEND: str = "local"  # Options: "local" or "s3"
-    STORAGE_PATH: str = "/data/storage"
+    STORAGE_PATH: str = os.path.join(os.getcwd(), "storage")
 
     # S3 Storage Configuration
     AWS_REGION: str = "eu-west-1"
