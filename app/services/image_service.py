@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, Any
 from fastapi import UploadFile
 
-from app.db.sqlite import ProcessorDB
+from app.services.processor_service import ProcessorService
 from app.storage.protocol import StorageBackend
 from app.tasks.celery_app import process_image_task
 from app.core.logging_config import get_logger
@@ -40,8 +40,8 @@ class ImageService:
     - Headers, cookies, sessions
     """
 
-    def __init__(self, db: ProcessorDB, storage: StorageBackend):
-        self.db = db
+    def __init__(self, processor_service: ProcessorService, storage: StorageBackend):
+        self.processor_service = processor_service
         self.storage = storage
 
     async def process_new_upload(
@@ -116,7 +116,7 @@ class ImageService:
 
         # 4. Database Transaction (Atomic Job Creation)
         try:
-            await self.db.create_job(
+            await self.processor_service.create_job(
                 job_id=job_id,
                 image_id=image_id,
                 storage_bucket=bucket,
@@ -158,7 +158,7 @@ class ImageService:
 
             # Rollback: Mark job as failed in database
             try:
-                await self.db.update_job_status(
+                await self.processor_service.update_job_status(
                     job_id=job_id,
                     status='failed',
                     error=f"Storage save failed: {str(e)}"
@@ -190,7 +190,7 @@ class ImageService:
 
             # Rollback: Mark job as failed in database
             try:
-                await self.db.update_job_status(
+                await self.processor_service.update_job_status(
                     job_id=job_id,
                     status='failed',
                     error=f"Task queue failed: {str(e)}"
@@ -243,7 +243,7 @@ class ImageService:
         Raises:
             ServiceError: If job not found (404 with JOB_NOT_FOUND code)
         """
-        job = await self.db.get_job(job_id)
+        job = await self.processor_service.get_job(job_id)
         if not job:
             raise not_found_error(
                 code=ErrorCode.JOB_NOT_FOUND,
@@ -256,9 +256,6 @@ class ImageService:
             "image_id": job["image_id"],
             "status": job["status"],
             "created_at": job["created_at"],
-            "updated_at": job["updated_at"],
+            "completed_at": job.get("completed_at"),
             "last_error": job.get("last_error")
         }
-
-
-# Updated: 2025-11-18 22:01 UTC - Production-ready code

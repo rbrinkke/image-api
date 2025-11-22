@@ -1,15 +1,18 @@
 """Technical dashboard API for system monitoring and troubleshooting."""
 
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select, func, text
+from sqlalchemy.ext.asyncio import AsyncSession
 import psutil
 import os
 
-from app.db.sqlite import get_db
+from app.db.session import get_session
+from app.db.models import ProcessingJob, ImageUploadEvent, UploadRateLimit
 from app.core.config import settings
 from app.core.logging_config import get_logger
 from app.tasks.celery_app import celery_app
@@ -20,7 +23,7 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
 # Track application start time for uptime calculation
-_start_time = datetime.utcnow()
+_start_time = datetime.now(timezone.utc)
 
 
 async def get_redis_info() -> Dict[str, Any]:
@@ -118,7 +121,7 @@ async def get_celery_info() -> Dict[str, Any]:
             },
             "registered_tasks": sorted(list(all_registered_tasks))
         }
-    except (TimeoutError, OSError, ConnectionError) as e:
+    except (TimeoutError, OSError, ConnectionError, Exception) as e:
         logger.warning(f"Celery inspection failed: {type(e).__name__}: {e}")
         return {
             "status": "down",
@@ -128,54 +131,53 @@ async def get_celery_info() -> Dict[str, Any]:
         }
 
 
-async def get_database_info(db) -> Dict[str, Any]:
+async def get_database_info(session: AsyncSession) -> Dict[str, Any]:
     """Get database health and statistics.
 
     Args:
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: Database status and metrics
     """
     try:
-        async with aiosqlite.connect(db.db_path) as conn:
-            # Get table counts
-            tables = {}
-            for table in ["processing_jobs", "image_upload_events", "upload_rate_limits"]:
-                async with conn.execute(f"SELECT COUNT(*) FROM {table}") as cursor:
-                    row = await cursor.fetchone()
-                    tables[table] = row[0] if row else 0
+        # Get table counts
+        tables = {}
+        for model in [ProcessingJob, ImageUploadEvent, UploadRateLimit]:
+            stmt = select(func.count()).select_from(model)
+            result = await session.execute(stmt)
+            tables[model.__tablename__] = result.scalar() or 0
 
-            # Get recent activity
-            async with conn.execute("""
-                SELECT created_at FROM processing_jobs
-                ORDER BY created_at DESC LIMIT 1
-            """) as cursor:
-                row = await cursor.fetchone()
-                last_job_created = row[0] if row else None
+        # Get recent activity
+        stmt_job = select(ProcessingJob.created_at).order_by(ProcessingJob.created_at.desc()).limit(1)
+        result_job = await session.execute(stmt_job)
+        last_job_created = result_job.scalar()
 
-            async with conn.execute("""
-                SELECT created_at FROM image_upload_events
-                ORDER BY created_at DESC LIMIT 1
-            """) as cursor:
-                row = await cursor.fetchone()
-                last_event_logged = row[0] if row else None
+        stmt_event = select(ImageUploadEvent.created_at).order_by(ImageUploadEvent.created_at.desc()).limit(1)
+        result_event = await session.execute(stmt_event)
+        last_event_logged = result_event.scalar()
 
-            # Get database file size
-            db_size_bytes = Path(db.db_path).stat().st_size
+        # Format dates
+        last_job_created_str = last_job_created.isoformat() if last_job_created else None
+        last_event_logged_str = last_event_logged.isoformat() if last_event_logged else None
+
+        # Get database file size (only for SQLite, fallback for others)
+        db_size_mb = "N/A"
+        if settings.DATABASE_PATH and os.path.exists(settings.DATABASE_PATH):
+            db_size_bytes = Path(settings.DATABASE_PATH).stat().st_size
             db_size_mb = round(db_size_bytes / (1024 * 1024), 2)
 
-            return {
-                "status": "healthy",
-                "path": db.db_path,
-                "size_mb": db_size_mb,
-                "connection_ok": True,
-                "tables": tables,
-                "recent_activity": {
-                    "last_job_created": last_job_created,
-                    "last_event_logged": last_event_logged
-                }
+        return {
+            "status": "healthy",
+            "path": settings.DATABASE_PATH,
+            "size_mb": db_size_mb,
+            "connection_ok": True,
+            "tables": tables,
+            "recent_activity": {
+                "last_job_created": last_job_created_str,
+                "last_event_logged": last_event_logged_str
             }
+        }
     except Exception as e:
         logger.error(f"Failed to get database info: {e}")
         return {
@@ -185,100 +187,92 @@ async def get_database_info(db) -> Dict[str, Any]:
         }
 
 
-async def get_processing_metrics(db) -> Dict[str, Any]:
+async def get_processing_metrics(session: AsyncSession) -> Dict[str, Any]:
     """Get processing job metrics and performance data.
 
     Args:
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: Processing metrics
     """
     try:
-        async with aiosqlite.connect(db.db_path) as conn:
-            # Jobs by status
-            async with conn.execute("""
-                SELECT status, COUNT(*) as count
-                FROM processing_jobs
-                GROUP BY status
-            """) as cursor:
-                jobs_by_status = {row[0]: row[1] for row in await cursor.fetchall()}
+        # Jobs by status
+        stmt = select(ProcessingJob.status, func.count(ProcessingJob.job_id)).group_by(ProcessingJob.status)
+        result = await session.execute(stmt)
+        jobs_by_status = {row[0]: row[1] for row in result.all()}
 
-            # Last hour performance
-            async with conn.execute("""
-                SELECT
-                    COUNT(*) as total,
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-                    AVG(CASE
-                        WHEN status = 'completed' AND completed_at IS NOT NULL
-                        THEN (julianday(completed_at) - julianday(created_at)) * 86400
-                        ELSE NULL
-                    END) as avg_seconds
-                FROM processing_jobs
-                WHERE created_at > datetime('now', '-1 hour')
-            """) as cursor:
-                row = await cursor.fetchone()
-                last_hour = {
-                    "total": row[0] or 0,
-                    "completed": row[1] or 0,
-                    "failed": row[2] or 0,
-                    "avg_processing_time_seconds": round(row[3], 2) if row[3] else None
-                }
+        # Helper to calculate metrics for a timeframe
+        async def calc_metrics(cutoff_time):
+            stmt = select(ProcessingJob).where(ProcessingJob.created_at > cutoff_time)
+            result = await session.execute(stmt)
+            jobs = result.scalars().all()
 
-            # Last 24h performance
-            async with conn.execute("""
-                SELECT
-                    COUNT(*) as total,
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-                    AVG(CASE
-                        WHEN status = 'completed' AND completed_at IS NOT NULL
-                        THEN (julianday(completed_at) - julianday(created_at)) * 86400
-                        ELSE NULL
-                    END) as avg_seconds
-                FROM processing_jobs
-                WHERE created_at > datetime('now', '-24 hours')
-            """) as cursor:
-                row = await cursor.fetchone()
-                last_24h = {
-                    "total": row[0] or 0,
-                    "completed": row[1] or 0,
-                    "failed": row[2] or 0,
-                    "avg_processing_time_seconds": round(row[3], 2) if row[3] else None
-                }
+            total = len(jobs)
+            completed = sum(1 for j in jobs if j.status == 'completed')
+            failed = sum(1 for j in jobs if j.status == 'failed')
 
-            # Recent jobs (last 10)
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute("""
-                SELECT
-                    job_id, image_id, status, created_at, completed_at,
-                    (julianday(COALESCE(completed_at, datetime('now'))) - julianday(created_at)) * 86400 as processing_time
-                FROM processing_jobs
-                ORDER BY created_at DESC
-                LIMIT 10
-            """) as cursor:
-                rows = await cursor.fetchall()
-                recent_jobs = [
-                    {
-                        "job_id": row["job_id"],
-                        "image_id": row["image_id"],
-                        "status": row["status"],
-                        "created_at": row["created_at"],
-                        "completed_at": row["completed_at"],
-                        "processing_time_seconds": round(row["processing_time"], 2) if row["processing_time"] else None
-                    }
-                    for row in rows
-                ]
+            durations = []
+            for j in jobs:
+                if j.status == 'completed' and j.completed_at and j.created_at:
+                     # ensure aware datetimes
+                    start = j.created_at
+                    end = j.completed_at
+                    if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
+                    if end.tzinfo is None: end = end.replace(tzinfo=timezone.utc)
+                    durations.append((end - start).total_seconds())
+
+            avg_seconds = round(sum(durations) / len(durations), 2) if durations else None
 
             return {
-                "jobs_by_status": jobs_by_status,
-                "performance": {
-                    "last_hour": last_hour,
-                    "last_24h": last_24h
-                },
-                "recent_jobs": recent_jobs
+                "total": total,
+                "completed": completed,
+                "failed": failed,
+                "avg_processing_time_seconds": avg_seconds
             }
+
+        now = datetime.now(timezone.utc)
+        last_hour = await calc_metrics(now - timedelta(hours=1))
+        last_24h = await calc_metrics(now - timedelta(hours=24))
+
+        # Recent jobs (last 10)
+        stmt_recent = select(ProcessingJob).order_by(ProcessingJob.created_at.desc()).limit(10)
+        result_recent = await session.execute(stmt_recent)
+        rows = result_recent.scalars().all()
+
+        recent_jobs = []
+        for row in rows:
+            proc_time = None
+            if row.completed_at and row.created_at:
+                # ensure aware datetimes
+                start = row.created_at
+                end = row.completed_at
+                if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
+                if end.tzinfo is None: end = end.replace(tzinfo=timezone.utc)
+                proc_time = (end - start).total_seconds()
+            elif row.created_at:
+                # if not completed, time since creation
+                start = row.created_at
+                if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
+                proc_time = (now - start).total_seconds()
+
+            recent_jobs.append({
+                "job_id": row.job_id,
+                "image_id": row.image_id,
+                "status": row.status,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+                "processing_time_seconds": round(proc_time, 2) if proc_time else None
+            })
+
+        return {
+            "jobs_by_status": jobs_by_status,
+            "performance": {
+                "last_hour": last_hour,
+                "last_24h": last_24h
+            },
+            "recent_jobs": recent_jobs
+        }
     except Exception as e:
         logger.error(f"Failed to get processing metrics: {e}")
         return {
@@ -286,11 +280,11 @@ async def get_processing_metrics(db) -> Dict[str, Any]:
         }
 
 
-async def get_storage_info(db) -> Dict[str, Any]:
+async def get_storage_info(session: AsyncSession) -> Dict[str, Any]:
     """Get storage backend information.
 
     Args:
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: Storage status and metrics
@@ -321,13 +315,9 @@ async def get_storage_info(db) -> Dict[str, Any]:
             info["region"] = settings.AWS_REGION
 
         # Get total unique images from database
-        async with aiosqlite.connect(db.db_path) as conn:
-            async with conn.execute("""
-                SELECT COUNT(DISTINCT image_id) FROM processing_jobs
-                WHERE status = 'completed'
-            """) as cursor:
-                row = await cursor.fetchone()
-                info["total_images"] = row[0] if row else 0
+        stmt = select(func.count(func.distinct(ProcessingJob.image_id))).where(ProcessingJob.status == 'completed')
+        result = await session.execute(stmt)
+        info["total_images"] = result.scalar() or 0
 
         return info
     except Exception as e:
@@ -338,111 +328,107 @@ async def get_storage_info(db) -> Dict[str, Any]:
         }
 
 
-async def get_rate_limit_info(db) -> Dict[str, Any]:
+async def get_rate_limit_info(session: AsyncSession) -> Dict[str, Any]:
     """Get rate limiting statistics.
 
     Args:
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: Rate limit metrics
     """
     try:
-        async with aiosqlite.connect(db.db_path) as conn:
-            conn.row_factory = aiosqlite.Row
+        # Get users near limit (>80% of limit)
+        threshold = int(settings.RATE_LIMIT_MAX_UPLOADS * 0.8)
+        stmt = select(UploadRateLimit).where(
+            UploadRateLimit.upload_count >= threshold
+        ).order_by(UploadRateLimit.upload_count.desc()).limit(10)
 
-            # Get users near limit (>80% of limit)
-            threshold = int(settings.RATE_LIMIT_MAX_UPLOADS * 0.8)
-            async with conn.execute("""
-                SELECT user_id, upload_count, window_start
-                FROM upload_rate_limits
-                WHERE upload_count >= ?
-                ORDER BY upload_count DESC
-                LIMIT 10
-            """, (threshold,)) as cursor:
-                rows = await cursor.fetchall()
-                users_near_limit = [
-                    {
-                        "user_id": row["user_id"],
-                        "count": row["upload_count"],
-                        "limit": settings.RATE_LIMIT_MAX_UPLOADS,
-                        "window_start": row["window_start"],
-                        "percent_used": round((row["upload_count"] / settings.RATE_LIMIT_MAX_UPLOADS) * 100, 1)
-                    }
-                    for row in rows
-                ]
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
 
-            # Get total active windows
-            async with conn.execute("""
-                SELECT COUNT(*) FROM upload_rate_limits
-            """) as cursor:
-                row = await cursor.fetchone()
-                total_active_windows = row[0] if row else 0
-
-            return {
-                "users_near_limit": users_near_limit,
-                "total_active_windows": total_active_windows,
-                "max_uploads_per_hour": settings.RATE_LIMIT_MAX_UPLOADS
+        users_near_limit = [
+            {
+                "user_id": row.user_id,
+                "count": row.upload_count,
+                "limit": settings.RATE_LIMIT_MAX_UPLOADS,
+                "window_start": row.window_start,
+                "percent_used": round((row.upload_count / settings.RATE_LIMIT_MAX_UPLOADS) * 100, 1)
             }
+            for row in rows
+        ]
+
+        # Get total active windows
+        stmt_count = select(func.count()).select_from(UploadRateLimit)
+        result_count = await session.execute(stmt_count)
+        total_active_windows = result_count.scalar() or 0
+
+        return {
+            "users_near_limit": users_near_limit,
+            "total_active_windows": total_active_windows,
+            "max_uploads_per_hour": settings.RATE_LIMIT_MAX_UPLOADS
+        }
     except Exception as e:
         logger.error(f"Failed to get rate limit info: {e}")
         return {"error": str(e)}
 
 
-async def get_error_info(db) -> Dict[str, Any]:
+async def get_error_info(session: AsyncSession) -> Dict[str, Any]:
     """Get error and failure statistics.
 
     Args:
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: Error metrics
     """
     try:
-        async with aiosqlite.connect(db.db_path) as conn:
-            conn.row_factory = aiosqlite.Row
+        # Recent failures (last 10)
+        stmt_recent = select(ProcessingJob).where(
+            ProcessingJob.status == 'failed'
+        ).order_by(ProcessingJob.completed_at.desc()).limit(10)
 
-            # Recent failures (last 10)
-            async with conn.execute("""
-                SELECT job_id, image_id, last_error, attempt_count, created_at, completed_at
-                FROM processing_jobs
-                WHERE status = 'failed'
-                ORDER BY completed_at DESC
-                LIMIT 10
-            """) as cursor:
-                rows = await cursor.fetchall()
-                recent_failures = [
-                    {
-                        "job_id": row["job_id"],
-                        "image_id": row["image_id"],
-                        "error": row["last_error"],
-                        "attempts": row["attempt_count"],
-                        "created_at": row["created_at"],
-                        "failed_at": row["completed_at"]
-                    }
-                    for row in rows
-                ]
+        result_recent = await session.execute(stmt_recent)
+        rows = result_recent.scalars().all()
 
-            # Error summary
-            async with conn.execute("""
-                SELECT
-                    SUM(CASE WHEN created_at > datetime('now', '-1 hour') THEN 1 ELSE 0 END) as last_hour,
-                    SUM(CASE WHEN created_at > datetime('now', '-24 hours') THEN 1 ELSE 0 END) as last_24h,
-                    COUNT(*) as total
-                FROM processing_jobs
-                WHERE status = 'failed'
-            """) as cursor:
-                row = await cursor.fetchone()
-                error_summary = {
-                    "last_hour": row[0] if row else 0,
-                    "last_24h": row[1] if row else 0,
-                    "total": row[2] if row else 0
-                }
-
-            return {
-                "recent_failures": recent_failures,
-                "error_summary": error_summary
+        recent_failures = [
+            {
+                "job_id": row.job_id,
+                "image_id": row.image_id,
+                "error": row.last_error,
+                "attempts": row.attempt_count,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "failed_at": row.completed_at.isoformat() if row.completed_at else None
             }
+            for row in rows
+        ]
+
+        # Error summary
+        # This logic mimics the SQL SUM(CASE...) logic in python to be DB agnostic or require complex SQL expression
+        # Using simple counts for now
+
+        cutoff_1h = datetime.now(timezone.utc) - timedelta(hours=1)
+        cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        stmt_1h = select(func.count()).where(ProcessingJob.status == 'failed', ProcessingJob.created_at > cutoff_1h)
+        count_1h = (await session.execute(stmt_1h)).scalar() or 0
+
+        stmt_24h = select(func.count()).where(ProcessingJob.status == 'failed', ProcessingJob.created_at > cutoff_24h)
+        count_24h = (await session.execute(stmt_24h)).scalar() or 0
+
+        stmt_total = select(func.count()).where(ProcessingJob.status == 'failed')
+        count_total = (await session.execute(stmt_total)).scalar() or 0
+
+        error_summary = {
+            "last_hour": count_1h,
+            "last_24h": count_24h,
+            "total": count_total
+        }
+
+        return {
+            "recent_failures": recent_failures,
+            "error_summary": error_summary
+        }
     except Exception as e:
         logger.error(f"Failed to get error info: {e}")
         return {"error": str(e)}
@@ -470,14 +456,14 @@ async def get_system_info() -> Dict[str, Any]:
         process_memory = process.memory_info()
 
         # Uptime
-        uptime_seconds = (datetime.utcnow() - _start_time).total_seconds()
+        uptime_seconds = (datetime.now(timezone.utc) - _start_time).total_seconds()
 
         return {
             "service_name": settings.SERVICE_NAME,
             "version": settings.VERSION,
             "uptime_seconds": round(uptime_seconds, 1),
             "uptime_human": str(timedelta(seconds=int(uptime_seconds))),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "resources": {
                 "cpu": {
                     "percent": cpu_percent,
@@ -507,14 +493,14 @@ async def get_system_info() -> Dict[str, Any]:
         return {
             "service_name": settings.SERVICE_NAME,
             "version": settings.VERSION,
-            "uptime_seconds": (datetime.utcnow() - _start_time).total_seconds(),
-            "timestamp": datetime.utcnow().isoformat(),
+            "uptime_seconds": (datetime.now(timezone.utc) - _start_time).total_seconds(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e)
         }
 
 
 @router.get("/data")
-async def get_dashboard_data(db=Depends(get_db)):
+async def get_dashboard_data(session: AsyncSession = Depends(get_session)):
     """Get comprehensive dashboard data for monitoring and troubleshooting.
 
     Returns all technical metrics in a single response:
@@ -529,20 +515,20 @@ async def get_dashboard_data(db=Depends(get_db)):
     - Configuration summary
 
     Args:
-        db: Database instance
+        session: Database session
 
     Returns:
         dict: Complete dashboard data
     """
     # Gather all metrics concurrently would be ideal, but for simplicity we'll do sequential
     system = await get_system_info()
-    database = await get_database_info(db)
+    database = await get_database_info(session)
     redis_info = await get_redis_info()
     celery_info = await get_celery_info()
-    processing = await get_processing_metrics(db)
-    storage = await get_storage_info(db)
-    rate_limits = await get_rate_limit_info(db)
-    errors = await get_error_info(db)
+    processing = await get_processing_metrics(session)
+    storage = await get_storage_info(session)
+    rate_limits = await get_rate_limit_info(session)
+    errors = await get_error_info(session)
 
     return {
         "system": system,
@@ -572,6 +558,10 @@ async def dashboard_ui():
     Returns:
         HTMLResponse: Dashboard interface with auto-refresh
     """
+    # ... (HTML content is same as before, just omitting for brevity if allowed, but must keep it valid)
+    # I'll assume the HTML content is static and doesn't need changes, so I'll keep it.
+    # Wait, I need to provide the full content or I break the file.
+
     html_content = """
 <!DOCTYPE html>
 <html lang="en">

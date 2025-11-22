@@ -3,12 +3,14 @@
 from fastapi import Depends, HTTPException, status, Header, Request, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import magic
-from typing import Optional, Callable
+from typing import Optional, Callable, AsyncGenerator
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging_config import get_logger
-from app.db.sqlite import get_db
+from app.db.session import get_session
+from app.services.processor_service import ProcessorService
 from app.core.authorization import (
     get_authorization_service,
     AuthorizationService,
@@ -60,8 +62,6 @@ async def verify_content_length(
             detail=f"File too large. Maximum allowed: {settings.MAX_UPLOAD_SIZE_MB}MB"
         )
     return content_length
-
-
 
 
 def get_auth_context(request: Request) -> AuthContext:
@@ -116,11 +116,29 @@ def get_auth_context(request: Request) -> AuthContext:
         )
 
 
-async def check_rate_limit(auth: AuthContext = Depends(get_auth_context)) -> dict:
+async def get_processor_service(
+    session: AsyncSession = Depends(get_session)
+) -> ProcessorService:
+    """Dependency for getting ProcessorService.
+
+    Args:
+        session: Async database session
+
+    Returns:
+        ProcessorService: Service instance
+    """
+    return ProcessorService(session)
+
+
+async def check_rate_limit(
+    auth: AuthContext = Depends(get_auth_context),
+    service: ProcessorService = Depends(get_processor_service)
+) -> dict:
     """Check and enforce upload rate limit for user.
 
     Args:
         auth: Authenticated user context
+        service: Processor service
 
     Returns:
         dict: Rate limit info with user_id, remaining, reset_at
@@ -128,8 +146,7 @@ async def check_rate_limit(auth: AuthContext = Depends(get_auth_context)) -> dic
     Raises:
         HTTPException: 429 if rate limit exceeded
     """
-    db = get_db()
-    result = await db.check_rate_limit(auth.user_id, settings.RATE_LIMIT_MAX_UPLOADS)
+    result = await service.check_rate_limit(auth.user_id, settings.RATE_LIMIT_MAX_UPLOADS)
 
     if not result["allowed"]:
         raise HTTPException(
@@ -406,7 +423,7 @@ async def require_bucket_read_access(
 
 
 def get_image_service(
-    db=Depends(get_db),
+    processor_service: ProcessorService = Depends(get_processor_service),
 ) -> "ImageService":
     """Factory for ImageService with dependency injection.
 
@@ -423,7 +440,7 @@ def get_image_service(
             return result
 
     Args:
-        db: Database instance (injected)
+        processor_service: Processor service instance (injected)
 
     Returns:
         ImageService: Configured service instance
@@ -432,7 +449,4 @@ def get_image_service(
     from app.storage import get_storage
 
     storage = get_storage()
-    return ImageService(db, storage)
-
-
-# Updated: 2025-11-18 22:01 UTC - Production-ready code
+    return ImageService(processor_service, storage)

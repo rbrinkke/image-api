@@ -4,12 +4,12 @@ from celery import shared_task
 from PIL import Image
 import io
 import asyncio
-import aiosqlite
 from typing import Dict, Tuple
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel
 
-from app.db.sqlite import get_db
+from app.services.processor_service import ProcessorService
+from app.db.session import AsyncSessionLocal
 from app.storage import get_storage
 from app.core.config import settings
 from app.core.logging_config import get_logger
@@ -137,6 +137,163 @@ def process_variant(
     return buffer.read(), metadata
 
 
+async def _process_image_task_async(job_id: str, retry_func=None):
+    """Async implementation of processing task."""
+    async with AsyncSessionLocal() as session:
+        service = ProcessorService(session)
+        storage = get_storage()
+
+        try:
+            # Update status: processing
+            await service.update_job_status(job_id, 'processing')
+
+            # Get job details
+            job = await service.get_job(job_id)
+
+            if not job:
+                error_msg = f"Job {job_id} not found in database"
+                logger.error("job_not_found", job_id=job_id)
+                raise ValueError(error_msg)
+
+            image_id = job['image_id']
+            bucket = job['storage_bucket']
+            staging_path = job['staging_path']
+
+            logger.info(
+                "processing_image",
+                job_id=job_id,
+                image_id=image_id,
+                bucket=bucket,
+                staging_path=staging_path,
+            )
+
+            # Load raw image from staging
+            raw_bytes = await storage.load(bucket, staging_path)
+            image = Image.open(io.BytesIO(raw_bytes))
+
+            # Strip EXIF metadata (security + privacy)
+            image = strip_exif_metadata(image)
+            logger.info("exif_stripped", image_id=image_id, job_id=job_id)
+
+            # Extract dominant color
+            dominant_color = extract_dominant_color(image)
+            logger.info(
+                "dominant_color_extracted",
+                image_id=image_id,
+                job_id=job_id,
+                dominant_color=dominant_color,
+            )
+
+            # Process all size variants
+            processed_paths = {}
+            variants_metadata = {}
+
+            # Convert Pydantic model to dict for iteration
+            for variant_name, max_dim in settings.IMAGE_SIZES.model_dump().items():
+                logger.debug(
+                    "variant_generation_started",
+                    job_id=job_id,
+                    image_id=image_id,
+                    variant=variant_name,
+                    max_dimension=max_dim,
+                )
+
+                webp_bytes, meta = process_variant(image, max_dim, settings.WEBP_QUALITY)
+
+                # Storage path
+                webp_path = f"processed/{variant_name}/{image_id}_{variant_name}.webp"
+
+                # Upload to final storage
+                await storage.save(io.BytesIO(webp_bytes), bucket, webp_path)
+
+                processed_paths[variant_name] = webp_path
+                variants_metadata[variant_name] = meta
+
+                logger.info(
+                    "variant_uploaded",
+                    job_id=job_id,
+                    image_id=image_id,
+                    variant=variant_name,
+                    size_bytes=meta.size_bytes,
+                    width=meta.width,
+                    height=meta.height,
+                    storage_path=webp_path,
+                )
+
+            # Compile complete metadata using type-safe Pydantic model
+            processing_result = ProcessingResult(
+                dominant_color=dominant_color,
+                original_dimensions={
+                    'width': image.size[0],
+                    'height': image.size[1]
+                },
+                variants=variants_metadata
+            )
+
+            # Convert to dictionary and merge with existing metadata
+            total_metadata = processing_result.model_dump()
+            if job.get('processing_metadata'):
+                total_metadata = {**job['processing_metadata'], **total_metadata}
+
+            # Update job status: completed with paths and metadata
+            await service.update_job_status(
+                job_id,
+                'completed',
+                processed_paths=processed_paths,
+                processing_metadata=total_metadata
+            )
+
+            # Cleanup staging file
+            try:
+                await storage.delete(bucket, staging_path)
+                logger.info(
+                    "staging_cleanup_success",
+                    job_id=job_id,
+                    staging_path=staging_path,
+                )
+            except Exception as e:
+                logger.warning(
+                    "staging_cleanup_failed",
+                    job_id=job_id,
+                    staging_path=staging_path,
+                    error=str(e),
+                )
+
+            logger.info(
+                "job_completed",
+                job_id=job_id,
+                image_id=image_id,
+                variants_count=len(processed_paths),
+                dominant_color=dominant_color,
+            )
+
+            return {
+                'job_id': job_id,
+                'image_id': image_id,
+                'status': 'completed'
+            }
+
+        except Exception as exc:
+            logger.error(
+                "job_processing_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                exc_info=True,
+            )
+
+            # Check if retry is possible
+            can_retry = await service.can_retry(job_id)
+
+            if can_retry:
+                await service.update_job_status(job_id, 'retrying', error=str(exc))
+                if retry_func:
+                    raise retry_func(exc=exc)
+            else:
+                await service.update_job_status(job_id, 'failed', error=str(exc))
+                raise
+
+
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def process_image_task(self, job_id: str):
     """Main image processing task.
@@ -161,169 +318,7 @@ def process_image_task(self, job_id: str):
         Exception: Re-raises after max retries
     """
     logger.info("job_processing_started", job_id=job_id)
-
-    db = get_db()
-    storage = get_storage()
-
-    try:
-        # Update status: processing
-        asyncio.run(db.update_job_status(job_id, 'processing'))
-
-        # Get job details
-        job = asyncio.run(db.get_job(job_id))
-
-        if not job:
-            error_msg = f"Job {job_id} not found in database"
-            logger.error("job_not_found", job_id=job_id)
-            raise ValueError(error_msg)
-
-        image_id = job['image_id']
-        bucket = job['storage_bucket']
-        staging_path = job['staging_path']
-
-        logger.info(
-            "processing_image",
-            job_id=job_id,
-            image_id=image_id,
-            bucket=bucket,
-            staging_path=staging_path,
-        )
-
-        # Load raw image from staging
-        raw_bytes = asyncio.run(storage.load(bucket, staging_path))
-        image = Image.open(io.BytesIO(raw_bytes))
-
-        # Strip EXIF metadata (security + privacy)
-        image = strip_exif_metadata(image)
-        logger.info("exif_stripped", image_id=image_id, job_id=job_id)
-
-        # Extract dominant color
-        dominant_color = extract_dominant_color(image)
-        logger.info(
-            "dominant_color_extracted",
-            image_id=image_id,
-            job_id=job_id,
-            dominant_color=dominant_color,
-        )
-
-        # Process all size variants
-        processed_paths = {}
-        variants_metadata = {}
-
-        # Convert Pydantic model to dict for iteration
-        for variant_name, max_dim in settings.IMAGE_SIZES.model_dump().items():
-            logger.debug(
-                "variant_generation_started",
-                job_id=job_id,
-                image_id=image_id,
-                variant=variant_name,
-                max_dimension=max_dim,
-            )
-
-            webp_bytes, meta = process_variant(image, max_dim, settings.WEBP_QUALITY)
-
-            # Storage path
-            webp_path = f"processed/{variant_name}/{image_id}_{variant_name}.webp"
-
-            # Upload to final storage
-            asyncio.run(storage.save(io.BytesIO(webp_bytes), bucket, webp_path))
-
-            processed_paths[variant_name] = webp_path
-            variants_metadata[variant_name] = meta
-
-            logger.info(
-                "variant_uploaded",
-                job_id=job_id,
-                image_id=image_id,
-                variant=variant_name,
-                size_bytes=meta.size_bytes,
-                width=meta.width,
-                height=meta.height,
-                storage_path=webp_path,
-            )
-
-        # Compile complete metadata using type-safe Pydantic model
-        processing_result = ProcessingResult(
-            dominant_color=dominant_color,
-            original_dimensions={
-                'width': image.size[0],
-                'height': image.size[1]
-            },
-            variants=variants_metadata
-        )
-
-        # Convert to dictionary and merge with existing metadata
-        total_metadata = processing_result.model_dump()
-        if job.get('processing_metadata'):
-            total_metadata = {**job['processing_metadata'], **total_metadata}
-
-        # Update metadata as JSON string
-        import json
-        job['processing_metadata'] = json.dumps(total_metadata)
-
-        # Update job status: completed
-        asyncio.run(db.update_job_status(job_id, 'completed', processed_paths))
-
-        # Cleanup staging file
-        try:
-            asyncio.run(storage.delete(bucket, staging_path))
-            logger.info(
-                "staging_cleanup_success",
-                job_id=job_id,
-                staging_path=staging_path,
-            )
-        except Exception as e:
-            logger.warning(
-                "staging_cleanup_failed",
-                job_id=job_id,
-                staging_path=staging_path,
-                error=str(e),
-            )
-
-        logger.info(
-            "job_completed",
-            job_id=job_id,
-            image_id=image_id,
-            variants_count=len(processed_paths),
-            dominant_color=dominant_color,
-        )
-
-        return {
-            'job_id': job_id,
-            'image_id': image_id,
-            'status': 'completed'
-        }
-
-    except Exception as exc:
-        logger.error(
-            "job_processing_failed",
-            job_id=job_id,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            exc_info=True,
-        )
-
-        # Check if retry is possible
-        can_retry = asyncio.run(db.can_retry(job_id))
-
-        if can_retry:
-            asyncio.run(db.update_job_status(job_id, 'retrying', error=str(exc)))
-            logger.info(
-                "job_retry_scheduled",
-                job_id=job_id,
-                retry_attempt=self.request.retries + 1,
-                max_retries=self.max_retries,
-            )
-            raise self.retry(exc=exc)
-        else:
-            asyncio.run(db.update_job_status(job_id, 'failed', error=str(exc)))
-            logger.error(
-                "job_permanently_failed",
-                job_id=job_id,
-                retry_attempts=self.request.retries,
-                max_retries=self.max_retries,
-            )
-            raise
+    return asyncio.run(_process_image_task_async(job_id, self.retry))
 
 
 @shared_task
@@ -335,37 +330,28 @@ def cleanup_old_staging_files():
     Returns:
         int: Number of files cleaned
     """
-    from datetime import timedelta
-
-    db = get_db()
-    storage = get_storage()
-
-    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-
     async def do_cleanup():
-        async with aiosqlite.connect(db.db_path) as conn:
-            async with conn.execute("""
-                SELECT job_id, storage_bucket, staging_path
-                FROM processing_jobs
-                WHERE status IN ('failed', 'pending')
-                AND created_at < ?
-                AND staging_path IS NOT NULL
-            """, (cutoff,)) as cursor:
-                rows = await cursor.fetchall()
+        async with AsyncSessionLocal() as session:
+            service = ProcessorService(session)
+            storage = get_storage()
 
-        cleaned = 0
-        for row in rows:
-            try:
-                await storage.delete(row[1], row[2])
-                cleaned += 1
-            except Exception as e:
-                logger.warning(
-                    "staging_file_cleanup_failed",
-                    staging_path=row[2],
-                    error=str(e),
-                )
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
-        return cleaned
+            jobs = await service.get_old_failed_or_pending_jobs(cutoff)
+            cleaned = 0
+
+            for job in jobs:
+                if job.staging_path:
+                    try:
+                        await storage.delete(job.storage_bucket, job.staging_path)
+                        cleaned += 1
+                    except Exception as e:
+                         logger.warning(
+                            "staging_file_cleanup_failed",
+                            staging_path=job.staging_path,
+                            error=str(e),
+                        )
+            return cleaned
 
     cleaned = asyncio.run(do_cleanup())
     logger.info("staging_cleanup_completed", files_cleaned=cleaned)
@@ -381,19 +367,11 @@ def cleanup_old_rate_limits():
     Returns:
         int: Number of records deleted
     """
-    from datetime import timedelta
-
-    db = get_db()
-    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-
     async def do_cleanup():
-        async with aiosqlite.connect(db.db_path) as conn:
-            await conn.execute(
-                "DELETE FROM upload_rate_limits WHERE window_start < ?",
-                (cutoff,)
-            )
-            await conn.commit()
-            return conn.total_changes
+        async with AsyncSessionLocal() as session:
+             service = ProcessorService(session)
+             cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+             return await service.cleanup_old_rate_limits(cutoff)
 
     deleted = asyncio.run(do_cleanup())
     logger.info("rate_limits_cleanup_completed", records_deleted=deleted)
