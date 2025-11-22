@@ -16,7 +16,6 @@ from fastapi import UploadFile
 
 from app.services.processor_service import ProcessorService
 from app.storage.protocol import StorageBackend
-from app.tasks.celery_app import process_image_task
 from app.core.logging_config import get_logger
 from app.core.errors import ServiceError, ErrorCode, processing_error, not_found_error
 from app.core.config import settings
@@ -181,6 +180,8 @@ class ImageService:
 
         # 6. Task Queue Operation (Trigger Async Processing)
         try:
+            # Lazy import to avoid circular dependency
+            from app.tasks.celery_app import process_image_task
             process_image_task.delay(job_id)
             logger.info("processing_task_queued", job_id=job_id)
         except Exception as e:

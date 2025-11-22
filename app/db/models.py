@@ -35,9 +35,10 @@ class ProcessingJob(Base):
     # Timestamps
     # Using DateTime with timezone=True is best practice for Postgres,
     # but SQLite doesn't support it natively. SQLAlchemy handles the conversion.
+    # For SQLite, use CURRENT_TIMESTAMP instead of func.now()
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
+        server_default=func.current_timestamp(),
         nullable=False
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -57,7 +58,7 @@ class ImageUploadEvent(Base):
     metadata_: Mapped[Optional[dict[str, Any]]] = mapped_column("metadata", JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        server_default=func.now(),
+        server_default=func.current_timestamp(),
         nullable=False
     )
 

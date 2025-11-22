@@ -52,7 +52,7 @@ echo ""
 echo -e "${YELLOW}Step 3: Building and starting services...${NC}"
 echo "This may take a few minutes..."
 echo ""
-docker compose build --no-cache image-api
+docker compose build --no-cache api worker flower
 echo ""
 docker compose up -d
 echo ""
@@ -70,10 +70,16 @@ echo ""
 docker compose ps
 echo ""
 
-# Show image-api logs (last 10 lines)
-echo -e "${YELLOW}Image-API Logs (last 10 lines):${NC}"
+# Show api logs (last 10 lines)
+echo -e "${YELLOW}API Logs (last 10 lines):${NC}"
 echo ""
-docker compose logs --tail 10 image-api
+docker compose logs --tail 10 api
+echo ""
+
+# Show worker logs (last 10 lines)
+echo -e "${YELLOW}Worker Logs (last 10 lines):${NC}"
+echo ""
+docker compose logs --tail 10 worker
 echo ""
 
 echo -e "${BLUE}========================================${NC}"
@@ -81,8 +87,9 @@ echo -e "${GREEN}✅ Rebuild complete!${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 echo "Useful commands:"
-echo "  docker compose logs -f image-api    # Follow logs"
+echo "  docker compose logs -f api          # Follow API logs"
+echo "  docker compose logs -f worker       # Follow worker logs"
 echo "  docker compose ps                   # Check status"
-echo "  curl http://localhost:8009/health   # Test API health"
-echo "  curl http://localhost:8009/dashboard # Technical dashboard"
+echo "  curl http://localhost:8004/api/v1/health   # Test API health"
+echo "  curl http://localhost:8004/dashboard # Technical dashboard"
 echo ""
